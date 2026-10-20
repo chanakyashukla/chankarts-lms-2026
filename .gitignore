@@ -1,0 +1,16 @@
+# secrets & local config
+.env
+.env.local
+*.pem
+# databases & runtime data
+*.db
+*.sqlite3
+uploads/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+.DS_Store
+*.log
+logs/

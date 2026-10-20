@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: chankarts-academy-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: chankarts-academy-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: WEB3FORMS_ACCESS_KEY
+        sync: false
+      - key: EMAIL_TEST_MODE
+        value: "false"
+      - key: ADMIN_EMAIL
+        value: "chankarts.official@gmail.com"
+      - key: FROM_NAME
+        value: "ChankArts Music Academy"
+      - key: FRONTEND_URL
+        value: "https://chankarts.com"
+      - key: DEBUG
+        value: "false"
+      - key: PYTHON_VERSION
+        value: "3.12.0"
+
+databases:
+  - name: chankarts-academy-db
+    plan: free
+    databaseName: chankarts_academy
+    user: chankarts
