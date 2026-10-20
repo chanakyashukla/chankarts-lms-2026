@@ -1,0 +1,12 @@
+# Cloudflare Pages redirect rules (Netlify-compatible syntax).
+#
+# 1) API proxy — REQUIRED for production login.
+#    Replace YOUR-API-HOST with the deployed backend host (e.g. the Render or
+#    Railway URL) and uncomment the line. With this rule the frontend uses
+#    same-origin /api/* and no CORS override is needed.
+#
+# /api/*    https://YOUR-API-HOST/api/*    200
+
+# 2) SPA fallback: serve the app shell for client-side routes (deep links such
+#    as /login hard-load correctly). Existing static assets take precedence.
+/*    /index.html    200

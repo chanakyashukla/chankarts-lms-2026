@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="ChankArts Music Academy - Learn. Create. Perform. A professional music learning platform for students and instructors.">
+    <meta name="theme-color" content="#1a1a2e">
+    <title>ChankArts Music Academy</title>
+    <script>
+        /* Detect the mount point (base path) before any stylesheet loads so
+           relative css/js/asset URLs resolve correctly on every route,
+           including nested ones like /portal/dashboard. Works at
+           /academy (production), /chankarts-academy (GitHub Pages)
+           and / (root). */
+        (function () {
+            var segments = ['login', 'register', 'forgot-password', 'admin',
+                'registration-success', 'verify-email', 'portal'];
+            var seg = window.location.pathname.split('/')[1] || '';
+            var base = (!seg || segments.indexOf(seg) >= 0) ? '' : '/' + seg;
+            window.__APP_BASE = base;
+            var el = document.createElement('base');
+            el.setAttribute('href', (base || '') + '/');
+            document.head.insertBefore(el, document.head.firstChild);
+        })();
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/tokens.css">
+    <link rel="stylesheet" href="css/styles.css">
+    <link rel="stylesheet" href="css/admin.css">
+    <link rel="stylesheet" href="css/portal.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="header" id="header">
+            <div class="header__container">
+                <a href="/academy/" class="header__logo" aria-label="ChankArts Music Academy Home">
+                    <img src="assets/ChankArts Music Academy.png" alt="ChankArts Music Academy" class="header__logo-img">
+                </a>
+                <nav class="header__nav" id="mainNav">
+                    <a href="https://chankarts.com" class="header__nav-link" target="_blank" rel="noopener">ChankArts</a>
+                    <a href="/academy/" class="header__nav-link" data-route="home">Home</a>
+                    <a href="/academy/login" class="header__nav-link header__nav-link--btn" data-route="login">Login</a>
+                </nav>
+                <button class="header__menu-btn" id="menuBtn" aria-label="Toggle menu" aria-expanded="false">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </button>
+            </div>
+        </header>
+
+        <!-- Mobile Menu -->
+        <div class="mobile-menu" id="mobileMenu">
+            <nav class="mobile-menu__nav">
+                <a href="https://chankarts.com" class="mobile-menu__link" target="_blank" rel="noopener">ChankArts</a>
+                <a href="/academy/" class="mobile-menu__link" data-route="home">Home</a>
+                <a href="/academy/login" class="mobile-menu__link" data-route="login">Login</a>
+                <a href="/academy/register" class="mobile-menu__link" data-route="register">Register</a>
+            </nav>
+        </div>
+
+        <!-- Main Content -->
+        <main class="main" id="mainContent">
+            <!-- Pages will be rendered here -->
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <div class="footer__container">
+                <div class="footer__content">
+                    <div class="footer__brand">
+                        <img src="assets/ChankArts Music Academy.png" alt="ChankArts Music Academy" class="footer__logo-img">
+                    </div>
+                    <p class="footer__tagline">Learn. Create. Perform.</p>
+                    <div class="footer__links">
+                        <a href="https://chankarts.com" target="_blank" rel="noopener">ChankArts Official</a>
+                        <a href="https://www.youtube.com/@chankartsofficial" target="_blank" rel="noopener">YouTube</a>
+                        <a href="https://www.instagram.com/chankarts/" target="_blank" rel="noopener">Instagram</a>
+                    </div>
+                </div>
+                <div class="footer__bottom">
+                    <p>&copy; 2026 ChankArts. All rights reserved.</p>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <script src="js/app.js"></script>
+    <script src="js/admin.js"></script>
+    <script src="js/portal.js"></script>
+</body>
+</html>
