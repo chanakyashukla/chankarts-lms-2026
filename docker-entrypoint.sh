@@ -25,7 +25,7 @@ if [ -n "${R2_BUCKET_NAME:-}" ] && [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
             break
         fi
         ATTEMPT=$((ATTEMPT + 1))
-        if [ "$ATTEMPT" -ge 30 ]; then
+        if [ "$ATTEMPT" -ge 20 ]; then
             echo "Timed out mounting R2 — continuing with local uploads" >&2
             break
         fi
@@ -35,6 +35,18 @@ if [ -n "${R2_BUCKET_NAME:-}" ] && [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
         export UPLOAD_DIR="${UPLOAD_DIR:-$MOUNT_DIR/uploads}"
         mkdir -p "$UPLOAD_DIR"
         echo "Uploads directory: $UPLOAD_DIR (R2-backed, durable across container restarts)"
+    else
+        # PRODUCTION SAFETY: R2 was configured but did not mount. Continuing
+        # would silently store uploads on ephemeral container-local disk.
+        # Local development may opt into the fallback explicitly.
+        if [ "${UPLOAD_FALLBACK_LOCAL:-false}" = "true" ]; then
+            echo "WARNING: R2 mount failed — UPLOAD_FALLBACK_LOCAL=true, using container-local uploads (NOT durable)" >&2
+        else
+            echo "FATAL: R2 credentials are configured but the bucket could not be mounted." >&2
+            echo "Refusing to start with ephemeral uploads. Fix the R2 credentials/bucket," >&2
+            echo "or set UPLOAD_FALLBACK_LOCAL=true explicitly for local development." >&2
+            exit 1
+        fi
     fi
 fi
 

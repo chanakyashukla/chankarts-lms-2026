@@ -1,4 +1,6 @@
-FROM python:3.12-slim
+# Cloudflare Containers run linux/amd64 — pin the target platform so the
+# image is correct regardless of the build host (this Mac is arm64).
+FROM --platform=linux/amd64 python:3.12-slim
 
 WORKDIR /app
 
