@@ -146,6 +146,7 @@ const Portal = (function () {
     function badge(status) {
         const label = {
             scheduled: 'Scheduled', completed: 'Completed', rescheduled: 'Rescheduled',
+            absent: 'Absent',
             rescheduling_required: 'Reschedule Pending',
             cancelled: 'Cancelled', paid: 'Paid', pending: 'Pending', partially_paid: 'Partially Paid',
             void: 'Void', assigned: 'Assigned', submitted: 'Submitted', reviewed: 'Reviewed',

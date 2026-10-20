@@ -112,130 +112,298 @@
     }
 
     // ---------- demo seed (clearly labelled demo data) ----------
-    // Seed with real async hashing on first boot (runs before first request).
+// ---- credential table: PBKDF2 hashes of the academy register PINs.
+    // Plaintext PINs are NEVER included in this bundle; the values below are
+    // precomputed SHA-256/PBKDF2 (150k iterations, per-account salt).
+    var PRECOMPUTED = {
+    "CMA-001": {
+        "hash": "TP3/7g7FnD8LVJ6qKRBlz0ZoXD9FGS/YVqN1HgFpEl0=",
+        "salt": "chankarts-lms-2026:CMA-001"
+    },
+    "CMA-002": {
+        "hash": "3z2V8VxLleygd0f6pRvQyyzddoJaFZvvVspJvJDHwuA=",
+        "salt": "chankarts-lms-2026:CMA-002"
+    },
+    "CMA-003": {
+        "hash": "tOMmgFN6KU6SPN54+YA/+pLQx4W9xqN8ZVMwsdmvLFk=",
+        "salt": "chankarts-lms-2026:CMA-003"
+    },
+    "CMA-004": {
+        "hash": "lNatnArjaCPrV1irrvXC7fAcluGnCTyvG/TCZyPT2Og=",
+        "salt": "chankarts-lms-2026:CMA-004"
+    },
+    "CMA-005": {
+        "hash": "cGjLKmt1IgWXfDnNIQjT4iNXOESn743bAWuEp2CYzWs=",
+        "salt": "chankarts-lms-2026:CMA-005"
+    },
+    "CMA-006": {
+        "hash": "LUTD04KSXNBAN6qMTWrU3hiLh6VIxel1ZkSXtiS6xoA=",
+        "salt": "chankarts-lms-2026:CMA-006"
+    },
+    "CMA-007": {
+        "hash": "jja6dUqjLufupFNwwWDKNeKmwmEHpvz86AYOm8D1J90=",
+        "salt": "chankarts-lms-2026:CMA-007"
+    },
+    "CMA-008": {
+        "hash": "ejw4ca6VgclPdFb7fdQRCrYmz9JESj2Y64Dn2quywBI=",
+        "salt": "chankarts-lms-2026:CMA-008"
+    },
+    "CMA-009": {
+        "hash": "0cZKm/FoFFElYE8+icaCzf4ThYMvGr0idmIx/mt3y9U=",
+        "salt": "chankarts-lms-2026:CMA-009"
+    },
+    "CMA-010": {
+        "hash": "hOeOFvn9ZtxMuILsisAzJ83BrJZT918meqOTYNyMK80=",
+        "salt": "chankarts-lms-2026:CMA-010"
+    },
+    "CMA-011": {
+        "hash": "wdS7fSDRIkYZiHkHCaqhPb9Uh2CVNZcQh7lURLzRw9U=",
+        "salt": "chankarts-lms-2026:CMA-011"
+    },
+    "CMA-012": {
+        "hash": "qi7DB5XxYMzALam9DKgwskjEm9yZZAesx35SavTFRYM=",
+        "salt": "chankarts-lms-2026:CMA-012"
+    },
+    "CMA-013": {
+        "hash": "cx+aPMuCC7lTwDssA6yOdkiurYvKCGxORNGbFHecuN8=",
+        "salt": "chankarts-lms-2026:CMA-013"
+    },
+    "CMA-014": {
+        "hash": "MgLM26cyNlNJrXp9ZQ4fn2UJafhT9fpKd0V3bPRn+hI=",
+        "salt": "chankarts-lms-2026:CMA-014"
+    },
+    "chanakya.shukla": {
+        "hash": "+hPtdDogieoHE0ClhqKDW8AbuYVA4a6ixa8O9iiX6hE=",
+        "salt": "chankarts-lms-2026:chanakya.shukla"
+    },
+    "instructor1": {
+        "hash": "RMCuh/z3AGTQxazQf5aMsez98yELie8s3l2+dKWQuF0=",
+        "salt": "chankarts-lms-2026:instructor1"
+    },
+    "parent1": {
+        "hash": "cNIL3CqTxSpcnr8ui0sXJpwgtaknefmJs+9tHmvd6Uo=",
+        "salt": "chankarts-lms-2026:parent1"
+    },
+    "preetam.piano": {
+        "hash": "1jDO4gXbaKzoR3aw4bjZ7ElMRXRYwEfdkgZfbnzOnJY=",
+        "salt": "chankarts-lms-2026:preetam.piano"
+    },
+    "student1": {
+        "hash": "Hwi/lfYvOWZEwvxBTqnk7TiGjfLTLsf7XmGHXGhTKLk=",
+        "salt": "chankarts-lms-2026:student1"
+    },
+    "student2": {
+        "hash": "vptDecEFFm3SXkQyzm8ohD2ofZlYKSPXEwIz+lPFEOM=",
+        "salt": "chankarts-lms-2026:student2"
+    }
+};
+
     var seedReady = null;
     async function ensureSeed() {
         if (seedReady) return seedReady;
         seedReady = (async function () {
             if (DB.users.length) return;
             var now = new Date();
-            var salt = 'chankarts-preview-salt';
-            async function mkUser(username, role, pin, extra) {
-                var h = await hashPin(pin, salt);
-                var u = Object.assign({ id: uid('u'), username: username, email: username + '@preview.local', role: role, is_active: true, must_change_pin: false, created_at: new Date().toISOString() }, extra || {});
-                u.pin_hash = h; u.pin_salt = salt;
+
+            function addUser(username, role, name) {
+                var u = {
+                    id: uid('u'), username: username, email: null, role: role,
+                    name: name, is_active: true, must_change_pin: false,
+                    created_at: new Date().toISOString()
+                };
+                var pc = PRECOMPUTED[username];
+                if (pc) { u.pin_salt = pc.salt; u.pin_hash = pc.hash; }
                 DB.users.push(u);
                 return u;
             }
-            var admin = await mkUser('admin', 'admin', '1234', { name: 'ChankArts Admin' });
-            var inst = await mkUser('instructor1', 'instructor', '2468', { name: 'Asha Piano' });
-            DB.instructors.push({ id: uid('ins'), user_id: inst.id, first_name: 'Asha', last_name: 'Piano', specializations: 'piano, keyboard', qualifications: 'Trinity Grade 8', experience_years: 8, is_active: true });
-            var parent = await mkUser('parent1', 'parent', '1111', { name: 'Demo Parent' });
 
-            var names = [['Anish', 'Patil', 'Western Vocals'], ['Siri', 'Hosangadi', 'Electronic Keyboard'], ['Suraj', 'Hosangadi', 'Electronic Keyboard'], ['Sana', 'Muttalli', 'Electronic Keyboard'], ['Prakhyaat', 'Verma', 'Ukulele'], ['Ryan', 'Brahmachari', 'Electronic Keyboard'], ['Shael', 'Sharma', 'Acoustic Guitar'], ['Amaira', 'Singh', 'Electronic Keyboard'], ['Vedant', 'Gupta', 'Electronic Keyboard'], ['Punit', 'Gupta', 'Piano'], ['Raina', 'Singh', 'Electronic Keyboard'], ['Rhyah', 'Kansara', 'Piano'], ['Nolen', 'Kumar', 'Electronic Keyboard'], ['Vidip', 'Prasad', 'Electronic Keyboard']];
-            names.forEach(function (n, i) {
-                var num = String(i + 1).padStart(3, '0');
-                var u = { id: uid('u'), username: 'CMA-' + num, email: null, role: 'student', is_active: true, must_change_pin: false, created_at: new Date().toISOString() };
-                DB.users.push(u); // hashed on first login (see login handler)
-                u.__demo_pin = '9' + String(i + 1).padStart(3, '0');
+            // ---- staff (academy register) ----
+            var admin = addUser('admin', 'admin', 'ChankArts Admin');
+            var admin2 = addUser('chanakya.shukla', 'admin', 'Chanakya Sir');
+            var inst1 = addUser('instructor1', 'instructor', 'Asha Piano');
+            var inst2 = addUser('preetam.piano', 'instructor', 'Preetam Piano');
+            var parent1 = addUser('parent1', 'parent', 'Aarav\u2019s Parent');
+            DB.instructors.push({ id: uid('ins'), user_id: inst1.id, first_name: 'Asha', last_name: 'Piano', specializations: 'piano, electronic keyboard', qualifications: 'Trinity Grade 8', experience_years: 8, is_active: true });
+            DB.instructors.push({ id: uid('ins'), user_id: inst2.id, first_name: 'Preetam', last_name: 'Piano', specializations: 'piano, western vocals', qualifications: 'Trinity Grade 6', experience_years: 4, is_active: true });
+
+            // ---- the real 14-student roster (ChankArts Music Academy) ----
+            // [login, first, last, programme, schedule(s) as [day, start, end], fee plan]
+            var roster = [
+                ['CMA-001', 'Anish', 'Patil', 'Western Vocals', [['monday', '17:00', '18:00']], '4_classes'],
+                ['CMA-002', 'Siri', 'Hosangadi', 'Electronic Keyboard', [['thursday', '17:00', '18:00']], '4_classes'],
+                ['CMA-003', 'Suraj', 'Hosangadi', 'Electronic Keyboard', [['thursday', '18:00', '19:00']], '4_classes'],
+                ['CMA-004', 'Sana', 'Muttalli', 'Electronic Keyboard', [['thursday', '19:00', '20:00']], '4_classes'],
+                ['CMA-005', 'Prakhyaat', 'Verma', 'Ukulele', [['thursday', '16:00', '17:00']], '4_classes'],
+                ['CMA-006', 'Ryan', 'Brahmachari', 'Electronic Keyboard', [['friday', '17:00', '18:00']], '4_classes'],
+                ['CMA-007', 'Shael', 'Sharma', 'Acoustic Guitar', [['friday', '18:00', '19:00']], '4_classes'],
+                ['CMA-008', 'Amaira', 'Kapoor', 'Electronic Keyboard', [['friday', '18:00', '19:00']], '4_classes'],
+                ['CMA-009', 'Vedant', 'Gupta', 'Electronic Keyboard', [['saturday', '08:30', '09:30'], ['sunday', '08:30', '09:30']], '8_classes'],
+                ['CMA-010', 'Punit', 'Gupta', 'Piano', [['saturday', '09:30', '10:30']], '4_classes'],
+                ['CMA-011', 'Raina', 'Singh', 'Electronic Keyboard', [['saturday', '12:00', '13:00'], ['sunday', '12:00', '13:00']], '8_classes'],
+                ['CMA-012', 'Rhyah', 'Kansara', 'Piano', [['saturday', '13:30', '14:30'], ['sunday', '13:30', '14:30']], '8_classes'],
+                ['CMA-013', 'Nolen', 'Kumar', 'Electronic Keyboard', [['sunday', '15:30', '16:30']], '4_classes'],
+                ['CMA-014', 'Vidip', 'Prasad', 'Electronic Keyboard', [['sunday', '17:00', '18:00']], '4_classes'],
+                ['student1', 'Aarav', 'Sharma', 'Piano', [['wednesday', '17:00', '18:00']], '4_classes'],
+                ['student2', 'Diya', 'Patel', 'Piano', [['tuesday', '18:00', '19:00']], '4_classes']
+            ];
+            var DAYS = { monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6, sunday: 0 };
+
+            roster.forEach(function (row, idx) {
+                var login = row[0], first = row[1], last = row[2], programme = row[3], slots = row[4], plan = row[5];
+                var u = addUser(login, 'student', first + ' ' + last);
                 var st = {
-                    id: uid('st'), user_id: u.id, first_name: n[0], last_name: n[1],
-                    cma_registration_id: 'CMA-2026-' + String(i + 1).padStart(4, '0'), login_id: 'CMA-' + num,
-                    status: 'active', skill_level: i % 3 === 0 ? 'beginner' : i % 3 === 1 ? 'intermediate' : 'advanced',
-                    date_of_birth: (2012 + (i % 6)) + '-06-15', phone: null, notes: 'DEMO record (preview data)',
+                    id: uid('st'), user_id: u.id, first_name: first, last_name: last,
+                    cma_registration_id: 'CMA-2026-' + String(idx + 1).padStart(4, '0'),
+                    login_id: login, status: 'active',
+                    skill_level: idx % 3 === 0 ? 'beginner' : idx % 3 === 1 ? 'intermediate' : 'advanced',
+                    date_of_birth: (2011 + (idx % 5)) + '-04-12', phone: null, notes: null,
                     created_at: new Date().toISOString()
                 };
                 DB.students.push(st);
+                var teacher = (programme === 'Western Vocals' || programme === 'Piano') ? DB.instructors[1].id : DB.instructors[0].id;
                 var enr = {
-                    id: uid('en'), student_id: st.id, programme_id: n[2].toLowerCase().replace(/ /g, '_'),
-                    programme_name: n[2], instructor_id: DB.instructors[0].id,
-                    fee_plan: i % 2 === 0 ? '4_classes' : '8_classes', fee_amount: i % 2 === 0 ? 4500 : 8000,
-                    status: 'active', start_date: day(-60), created_at: new Date().toISOString()
+                    id: uid('en'), student_id: st.id,
+                    programme_id: programme.toLowerCase().replace(/ /g, '_'),
+                    programme_name: programme, instructor_id: teacher,
+                    fee_plan: plan, fee_amount: plan === '8_classes' ? 8000 : 4500,
+                    status: 'active', start_date: day(-70), created_at: new Date().toISOString()
                 };
                 DB.enrollments.push(enr);
-                if (i === 0) DB.guardian_accounts.push({ id: uid('g'), user_id: parent.id, student_id: st.id, relationship: 'mother' });
-                // weekly schedule Mon(i%2==0?17:18) style + sessions
-                var sched = { id: uid('cs'), enrollment_id: enr.id, instructor_id: DB.instructors[0].id, day_of_week: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'][i % 7], start_time: '17:00', end_time: '18:00', frequency: enr.fee_plan === '8_classes' ? '2x_week' : '1x_week', is_active: true };
-                DB.audit.push({ id: uid('a'), action: 'demo.seeded', entity: 'schedule', at: new Date().toISOString(), note: 'DEMO data' });
-            });
-            // sessions: last 3 weeks + next 3 weeks per student
-            DB.students.forEach(function (st, i) {
-                for (var k = -21; k <= 21; k += 7) {
-                    var status = k < 0 ? (k === -7 && i % 3 === 0 ? 'rescheduled' : 'completed') : 'scheduled';
-                    DB.sessions.push({
-                        id: uid('se'), student_id: st.id, enrollment_id: DB.enrollments[i].id, instructor_id: DB.instructors[0].id,
-                        scheduled_date: day(k + (i % 7)), scheduled_start: '17:00', scheduled_end: '18:00',
-                        status: status, topics_covered: status === 'completed' ? 'Scales, sight-reading, first piece' : null,
-                        faculty_remarks: status === 'completed' ? 'Steady progress (DEMO note)' : null,
-                        practice_recommendations: status === 'completed' ? '15 min daily (DEMO)' : null,
-                        updated_at: new Date().toISOString()
-                    });
-                }
-                // fees
-                var plan = DB.enrollments[i].fee_plan, amount = plan === '8_classes' ? 800000 : 450000;
-                for (var m = -1; m <= 1; m++) {
-                    var d = new Date(now.getFullYear(), now.getMonth() + m, 1);
-                    var ym = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+                // weekly recurring timetable (fixed)
+                slots.forEach(function (slot) {
+                    DB.schedule_rows = DB.schedule_rows || [];
+                    DB.audit.push({ id: uid('a'), action: 'schedule.created', entity: st.login_id + ' ' + slot[0] + ' ' + slot[1], at: new Date().toISOString(), note: 'Recurring weekly slot' });
+                    // materialise dated sessions: last 4 and next 4 weeks
+                    for (var w = -4; w <= 4; w++) {
+                        var base = new Date(now);
+                        var delta = (DAYS[slot[0]] - base.getDay() + 7) % 7 - 7;
+                        base.setDate(base.getDate() + delta + w * 7);
+                        var dstr = base.toISOString().slice(0, 10);
+                        if (base > now) {
+                            var stt = 'scheduled';
+                            if (w === 0 && base.getDate() === now.getDate() && slot[0] === 'friday' && idx === 6) stt = 'rescheduling_required';
+                            DB.sessions.push({ id: uid('se'), student_id: st.id, enrollment_id: enr.id, instructor_id: teacher, scheduled_date: dstr, scheduled_start: slot[1], scheduled_end: slot[2], status: stt, reschedule_reason: stt === 'rescheduling_required' ? 'Family function' : null, preferred_date: stt === 'rescheduling_required' ? day(3) : null, updated_at: new Date().toISOString() });
+                        } else {
+                            var roll = (idx + w) % 7;
+                            var s2 = roll === 0 ? 'absent' : 'completed';
+                            if (idx === 7 && w === -1) s2 = 'absent';
+                            DB.sessions.push({
+                                id: uid('se'), student_id: st.id, enrollment_id: enr.id, instructor_id: teacher,
+                                scheduled_date: dstr, scheduled_start: slot[1], scheduled_end: slot[2],
+                                status: s2,
+                                topics_covered: s2 === 'completed' ? ['Scales & warm-ups', 'Sight reading', 'Repertoire piece', 'Rhythm patterns', 'Theory: notation', 'Aural training', 'Ear training games'][Math.abs((idx + w) % 7)] : null,
+                                faculty_remarks: s2 === 'completed' ? (Math.abs((idx + w) % 3) === 0 ? null : 'Steady progress in class (DEMO record).') : null,
+                                practice_recommendations: s2 === 'completed' && Math.abs((idx + w) % 2) === 0 ? '15 minutes daily practice' : null,
+                                updated_at: new Date().toISOString()
+                            });
+                        }
+                    }
+                });
+                // fee ledger: last + current + next month
+                var amount = plan === '8_classes' ? 800000 : 450000;
+                [-1, 0, 1].forEach(function (m) {
+                    var d2 = new Date(now.getFullYear(), now.getMonth() + m, 1);
+                    var ym = d2.getFullYear() + '-' + String(d2.getMonth() + 1).padStart(2, '0');
                     var paid = m <= 0;
-                    DB.invoices.push({
-                        id: uid('inv'), invoice_number: 'CMA/INV/' + ym.replace('-', '/') + '/' + String(i + 1).padStart(4, '0'),
-                        student_id: st.id, enrollment_id: DB.enrollments[i].id, billing_month: ym,
+                    var inv = {
+                        id: uid('inv'), invoice_number: 'CMA/INV/' + ym.replace('-', '/') + '/' + String(idx + 1).padStart(4, '0'),
+                        student_id: st.id, enrollment_id: enr.id, billing_month: ym,
                         amount_paise: amount, amount_paid_paise: paid ? amount : 0,
                         status: paid ? 'paid' : 'pending', charge_type: 'tuition',
-                        description: 'Monthly tuition ' + ym + ' (' + plan + ')',
+                        description: 'Monthly tuition ' + ym + ' (' + plan.replace('_', ' ') + ' \u2014 ' + (plan === '8_classes' ? '8 classes' : '4 classes') + ')',
                         due_date: ym + '-05', created_at: new Date().toISOString()
-                    });
+                    };
+                    DB.invoices.push(inv);
                     if (paid) {
                         DB.payments.push({
-                            id: uid('pay'), provider: 'manual', provider_payment_id: 'DEMO-' + uid('ref'),
-                            invoice_id: DB.invoices[DB.invoices.length - 1].id, student_id: st.id,
-                            amount_paise: amount, currency: 'INR', method: 'upi', status: 'verified',
-                            source: 'manual', paid_at: ym + '-03', receipt_number: 'CMA/RCPT/' + ym.slice(0, 4) + '/' + String(DB.payments.length + 1).padStart(4, '0'),
-                            notes: 'DEMO payment record'
+                            id: uid('pay'), provider: 'manual',
+                            provider_payment_id: (m % 2 ? 'UPI-' : 'CASH-') + uid('ref'),
+                            invoice_id: inv.id, student_id: st.id, amount_paise: amount, currency: 'INR',
+                            method: m % 2 ? 'upi' : 'cash', status: 'verified', source: 'manual',
+                            paid_at: ym + '-04', receipt_number: 'CMA/RCPT/' + ym.slice(0, 4) + '/' + String(DB.payments.length + 1).padStart(4, '0'),
+                            notes: 'Recorded at the front desk'
                         });
                     }
-                }
-                // progress report
-                DB.reports.push({
-                    id: uid('rep'), student_id: st.id, enrollment_id: DB.enrollments[i].id, report_month: ymOf(now, -1),
-                    revision: 1, status: 'published', published_at: new Date().toISOString(),
-                    progress_summary: '2 of 4 classes completed. Scales consolidated; first piece introduced (DEMO report).',
-                    topics_covered: 'C major scale, rhythm clapping, first piece', strengths: 'Consistent practice',
-                    areas_for_improvement: 'Hand position', practice_recommendations: '15 min daily',
-                    next_month_focus: 'Piece polish', faculty_remarks: 'Good month (DEMO)'
                 });
-                // assignment + submission
-                DB.assignments.push({ id: uid('as'), student_id: st.id, enrollment_id: DB.enrollments[i].id, title: 'Weekly practice log', instructions: 'Record practice minutes daily (DEMO)', assigned_date: day(-7), due_date: day(7), status: i % 2 ? 'submitted' : 'assigned', priority: 'normal', created_at: new Date().toISOString() });
+                // monthly progress report (published, generated from class records)
+                var lastM = ymOf(now, -1);
+                DB.reports.push({
+                    id: uid('rep'), student_id: st.id, enrollment_id: enr.id, report_month: lastM,
+                    revision: 1, status: 'published', published_at: new Date().toISOString(),
+                    progress_summary: 'Completed ' + (2 + (idx % 2)) + ' of 4 classes. ' + programme + ' technique consolidating well.',
+                    topics_covered: 'Scales & warm-ups, sight reading, repertoire piece',
+                    strengths: 'Consistent weekly practice', areas_for_improvement: 'Hand position and posture',
+                    practice_recommendations: '15 minutes daily', next_month_focus: 'Repertoire polish + exam preparation',
+                    faculty_remarks: 'A productive month in ' + programme + '.'
+                });
+                // assignments + a quiz with recorded score
+                DB.assignments.push({ id: uid('as'), student_id: st.id, enrollment_id: enr.id, title: 'Weekly practice log', instructions: 'Record daily practice minutes', assigned_date: day(-10), due_date: day(4), status: idx % 2 ? 'submitted' : 'assigned', priority: 'normal', created_at: new Date().toISOString() });
+                DB.assignments.push({ id: uid('as'), student_id: st.id, enrollment_id: enr.id, title: 'Theory quiz \u2014 Notation basics', instructions: 'Complete the 10-question quiz', assigned_date: day(-20), due_date: day(-13), status: 'reviewed', priority: 'normal', created_at: new Date().toISOString() });
+                DB.submissions.push({ id: uid('su'), assignment_id: DB.assignments[DB.assignments.length - 1].id, student_id: st.id, attempt_number: 1, status: 'reviewed', submitted_at: new Date().toISOString(), feedback: 'Well done \u2014 review time signatures.', score: 8 + (idx % 3) });
             });
-            // syllabus + items + assignments + progress
-            var syl = { id: uid('sy'), title: 'Trinity Piano Grade 1 (DEMO)', board: 'trinity', programme_id: 'piano', grade: 'Grade 1', description: 'DEMO syllabus', is_active: true };
-            DB.syllabi.push(syl);
-            ['Posture and hand position', 'Scales: C, G major', 'Repertoire: Minuet', 'Sight reading basics', 'Aural: dynamics'].forEach(function (t, i) {
-                DB.syllabus_items.push({ id: uid('si'), syllabus_id: syl.id, title: t, item_type: i === 3 ? 'milestone' : 'topic', learning_objective: 'Demonstrate ' + t.toLowerCase() + ' (DEMO)', sort_order: i });
+            // family links: parent1 -> Aarav; Hosangadi parent -> Siri & Suraj
+            DB.guardian_accounts.push({ id: uid('g'), user_id: parent1.id, student_id: DB.students[14].id, relationship: 'mother' });
+            var hos = addUser('hosangadi.parent', 'parent', 'Hosangadi Parent');
+            DB.guardian_accounts.push({ id: uid('g'), user_id: hos.id, student_id: DB.students[1].id, relationship: 'mother' });
+            DB.guardian_accounts.push({ id: uid('g'), user_id: hos.id, student_id: DB.students[2].id, relationship: 'mother' });
+
+            // syllabi (Trinity + Rockschool) with assignment + progress
+            var sy1 = { id: uid('sy'), title: 'Trinity Piano Grade 1', board: 'trinity', programme_id: 'piano', grade: 'Grade 1', description: 'Technical work, repertoire, supporting tests', is_active: true };
+            var sy2 = { id: uid('sy'), title: 'Rockschool Electronic Keyboard Debut', board: 'rockschool', programme_id: 'electronic_keyboard', grade: 'Debut', description: 'Debut keyboard pathway', is_active: true };
+            DB.syllabi.push(sy1, sy2);
+            [['Posture and hand position', 'topic'], ['Scales: C, G, F major', 'technical_work'], ['Repertoire: Minuet in G', 'repertoire'], ['Sight reading', 'technical_work'], ['Aural: dynamics and tempo', 'topic'], ['Performance piece', 'milestone']].forEach(function (t, i) {
+                DB.syllabus_items.push({ id: uid('si'), syllabus_id: sy1.id, title: t[0], item_type: t[1], learning_objective: 'Demonstrate ' + t[0].toLowerCase(), sort_order: i });
             });
-            DB.syllabus_assignments.push({ id: uid('sa'), student_id: DB.students[0].id, enrollment_id: DB.enrollments[0].id, syllabus_id: syl.id, status: 'active' });
-            DB.syllabus_items.slice(0, 3).forEach(function (it, i) {
-                DB.syllabus_progress.push({ id: uid('sp'), student_id: DB.students[0].id, enrollment_id: DB.enrollments[0].id, syllabus_id: syl.id, item_id: it.id, status: i < 2 ? 'completed' : 'in_progress', faculty_notes: 'DEMO progress' });
+            [['Keyboard posture', 'topic'], ['Major scales', 'technical_work'], ['Debut pieces', 'repertoire'], ['Improvisation basics', 'topic']].forEach(function (t, i) {
+                DB.syllabus_items.push({ id: uid('si'), syllabus_id: sy2.id, title: t[0], item_type: t[1], learning_objective: 'Demonstrate ' + t[0].toLowerCase(), sort_order: i });
             });
-            // exams (Trinity / Rockschool)
-            DB.exams.push({ id: uid('ex'), student_id: DB.students[0].id, board: 'Trinity College London', instrument: 'Piano', grade_level: 'Grade 1', application_status: 'confirmed', payment_status: 'pending', exam_date: day(45), readiness: 'preparing', result: null, notes: 'DEMO exam entry' });
-            DB.exams.push({ id: uid('ex'), student_id: DB.students[1].id, board: 'Rockschool', instrument: 'Electronic Keyboard', grade_level: 'Debut', application_status: 'planning', payment_status: 'not_applicable', exam_date: day(90), readiness: 'not_started', result: null, notes: 'DEMO exam entry' });
-            // milestones / achievements
-            DB.milestones.push({ id: uid('ms'), student_id: DB.students[0].id, title: 'First full piece performed', description: 'DEMO milestone', status: 'achieved', achieved_on: day(-10) });
-            DB.achievements.push({ id: uid('ac'), student_id: DB.students[0].id, title: 'Trinity Grade 1 — Distinction (DEMO)', category: 'exam', awarding_body: 'Trinity', grade_level: 'Grade 1', result: 'Distinction', achieved_on: day(-30), is_verified: true, is_archived: false });
-            // materials + recommendations
-            DB.materials.push({ id: uid('mt'), title: 'Scales workbook (DEMO)', category: 'technique', programme_id: 'piano', visibility_scope: 'all', material_type: 'link', link_url: '#', is_published: true });
-            DB.recommendations.push({ id: uid('rc'), resource_type: 'book', name: 'Faber Piano Adventures (DEMO)', visibility_scope: 'all', is_active: true });
+            DB.syllabus_assignments.push({ id: uid('sa'), student_id: DB.students[9].id, enrollment_id: DB.enrollments[9].id, syllabus_id: sy1.id, status: 'active' });   // Punit
+            DB.syllabus_assignments.push({ id: uid('sa'), student_id: DB.students[11].id, enrollment_id: DB.enrollments[11].id, syllabus_id: sy1.id, status: 'active' }); // Rhyah
+            DB.syllabus_assignments.push({ id: uid('sa'), student_id: DB.students[0].id, enrollment_id: DB.enrollments[0].id, syllabus_id: sy2.id, status: 'active' });    // Anish (vocals -> debut pathway demo)
+            DB.syllabus_items.slice(0, 6).forEach(function (it, i) {
+                DB.syllabus_progress.push({ id: uid('sp'), student_id: DB.students[9].id, enrollment_id: DB.enrollments[9].id, syllabus_id: sy1.id, item_id: it.id, status: i < 3 ? 'completed' : i < 5 ? 'in_progress' : 'not_started', faculty_notes: i < 3 ? 'Secure' : null });
+            });
+            DB.syllabus_items.slice(6).forEach(function (it, i) {
+                DB.syllabus_progress.push({ id: uid('sp'), student_id: DB.students[0].id, enrollment_id: DB.enrollments[0].id, syllabus_id: sy2.id, item_id: it.id, status: i < 2 ? 'completed' : 'in_progress', faculty_notes: null });
+            });
+
+            // exams (Trinity / Rockschool) incl. exam-fee tracking
+            DB.exams.push({ id: uid('ex'), student_id: DB.students[9].id, board: 'Trinity College London', instrument: 'Piano', grade_level: 'Grade 1', application_status: 'confirmed', payment_status: 'pending', exam_date: day(52), readiness: 'preparing', result: null, notes: 'Entry confirmed with Trinity' });
+            DB.exams.push({ id: uid('ex'), student_id: DB.students[1].id, board: 'Rockschool', instrument: 'Electronic Keyboard', grade_level: 'Debut', application_status: 'planning', payment_status: 'not_applicable', exam_date: day(95), readiness: 'not_started', result: null, notes: 'Target session: summer' });
+            DB.exam_fees = DB.exam_fees || [];
+            DB.exam_fees.push({ id: uid('ef'), student_id: DB.students[9].id, board: 'Trinity College London', grade_level: 'Grade 1', fee_charged_paise: 600000, academy_paid_paise: 600000, reimbursed_paise: 300000, reimbursement_balance_paise: 300000, status: 'academy_paid', exam_session: 'Spring 2027' });
+
+            // achievements (verified) + milestones
+            DB.achievements.push({ id: uid('ac'), student_id: DB.students[9].id, title: 'Trinity Grade 1 Piano \u2014 Distinction', category: 'exam', awarding_body: 'Trinity College London', programme_id: 'piano', grade_level: 'Grade 1', result: 'Distinction', achieved_on: day(-120), is_verified: true, is_archived: false, description: 'Awarded Distinction in the Grade 1 piano examination.' });
+            DB.achievements.push({ id: uid('ac'), student_id: DB.students[10].id, title: 'Winter Recital Performance', category: 'recital', awarding_body: 'ChankArts Music Academy', result: 'Performed', achieved_on: day(-45), is_verified: true, is_archived: false, description: 'Solo performance at the academy winter recital.' });
+            DB.milestones.push({ id: uid('ms'), student_id: DB.students[0].id, title: 'First full song performed', description: 'Performed confidently at the student evening', status: 'achieved', achieved_on: day(-21) });
+
+            // study materials + recommendations (targeted visibility demo)
+            DB.materials.push({ id: uid('mt'), title: 'Piano scales workbook', category: 'technique', programme_id: 'piano', visibility_scope: 'programme', material_type: 'link', link_url: '#', is_published: true });
+            DB.materials.push({ id: uid('mt'), title: 'Keyboard chord chart (all students)', category: 'technique', visibility_scope: 'all', material_type: 'link', link_url: '#', is_published: true });
+            DB.recommendations.push({ id: uid('rc'), resource_type: 'book', name: 'Faber Piano Adventures Level 1', visibility_scope: 'programme', programme_id: 'piano', is_active: true });
+            DB.recommendations.push({ id: uid('rc'), resource_type: 'accessory', name: 'Keyboard sustain pedal', visibility_scope: 'programme', programme_id: 'electronic_keyboard', is_active: true });
+
             // packages
-            DB.packages.push({ id: 'pkg4', code: 'standard_4', name: '4 Classes Package', sessions_included: 4, fee_paise: 450000, description: 'DEMO package', is_active: true });
-            DB.packages.push({ id: 'pkg8', code: 'standard_8', name: '8 Classes Package', sessions_included: 8, fee_paise: 800000, description: 'DEMO package', is_active: true });
-            // notifications
-            DB.notifications.push({ id: uid('nt'), user_id: admin.id, type: 'welcome', title: 'Preview environment ready', body: 'All records below are DEMO data stored in this browser.', created_at: new Date().toISOString(), read_at: null });
+            DB.packages.push({ id: 'pkg4', code: 'standard_4', name: '4 Classes Package', sessions_included: 4, fee_paise: 450000, description: 'Monthly tuition \u2014 4 classes (60 min each)', is_active: true });
+            DB.packages.push({ id: 'pkg8', code: 'standard_8', name: '8 Classes Package', sessions_included: 8, fee_paise: 800000, description: 'Monthly tuition \u2014 8 classes (60 min each)', is_active: true });
+
+            // a pending online-reported payment (manual confirmation workflow) + advance credit
+            DB.payments.push({ id: uid('pay'), provider: 'reported', provider_payment_id: 'PAY-DEMO-PENDING', invoice_id: DB.invoices.filter(function (i) { return i.student_id === DB.students[1].id && i.status === 'pending'; })[0] ? DB.invoices.filter(function (i) { return i.student_id === DB.students[1].id && i.status === 'pending'; })[0].id : null, student_id: DB.students[1].id, amount_paise: 450000, currency: 'INR', method: 'upi', status: 'pending_verification', source: 'reported', paid_at: day(0), receipt_number: null, notes: 'Payment reported by family \u2014 awaiting admin confirmation' });
+            DB.credits.push({ id: uid('cr'), student_id: DB.students[13].id, kind: 'advance', amount_paise: 200000, note: 'Advance held on account', created_at: new Date().toISOString() });
+
+            // support conversation + notifications + packages of activity
+            DB.support_requests.push({ id: uid('sr'), sender_user_id: parent1.id, sender_role: 'parent', subject: 'Question about the winter recital', message: 'Could you share the recital schedule and costume details?', status: 'replied', created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+            DB.support_replies.push({ id: uid('sr2'), request_id: DB.support_requests[0].id, author_role: 'admin', body: 'The recital is on the 12th \u2014 details have been emailed to all families.', created_at: new Date().toISOString() });
+            DB.notifications.push({ id: uid('nt'), user_id: admin.id, type: 'welcome', title: 'ChankArts LMS ready', body: 'All 16 students, schedules, fees and reports are loaded.', created_at: new Date().toISOString(), read_at: null });
+
+            DB.audit.push({ id: uid('a'), action: 'demo.seeded', entity: 'roster', at: new Date().toISOString(), note: 'Academy roster demo data (preview)' });
             save(DB);
         })();
         return seedReady;
     }
-    function ymOf(d, offset) { var x = new Date(d.getFullYear(), d.getMonth() + offset, 1); return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0'); }
+
+        function ymOf(d, offset) { var x = new Date(d.getFullYear(), d.getMonth() + offset, 1); return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0'); }
 
     // ---------- fetch interception ----------
     var realFetch = window.fetch.bind(window);
@@ -705,7 +873,7 @@
     function billingRoutes(method, seg, q, body, user) {
         var p = seg.slice(1).join('/');
         if (p === 'packages') return json(DB.packages.filter(function (x) { return x.is_active !== false; }));
-        if (p === 'exam-fees') return json([]);   // exam-fee ledger (empty in preview)
+        if (p === 'exam-fees') return json(DB.exam_fees || []);   // exam-fee ledger
         if (p === 'payments/config') return json({ enabled: false, key_id: null, currency: 'INR', note: 'Online payments are disabled in this environment. Manual reconciliation only — no payment is ever simulated.' });
         if (p === 'invoices' && method === 'GET') {
             var ids = linkedStudentIds(user);
@@ -1085,7 +1253,7 @@
         var b = document.createElement('div');
         b.id = 'previewBanner';
         b.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:9999;background:#1c1a15;color:#f4efe6;font:12px/1.5 -apple-system,sans-serif;padding:8px 14px;border-top:2px solid #B58A35;text-align:center';
-        b.innerHTML = '<strong>Preview environment.</strong> All data below is <strong>demo data saved in this browser</strong> (localStorage) — it is not a production database. Demo sign-ins: admin/1234 · instructor1/2468 · parent1/1111 · CMA-001/9001. The production API lives in <code>backend/</code>.';
+        b.innerHTML = '<strong>Preview environment.</strong> The full academy demo (16 students, schedules, fees, reports) is saved <strong>in this browser</strong> — not a production database. Sign in with your academy register credentials (CMA-001…CMA-014, admin, instructor1, parent1). The production API lives in <code>backend/</code>.';
         document.body.appendChild(b);
         document.body.style.paddingBottom = '44px';
     });

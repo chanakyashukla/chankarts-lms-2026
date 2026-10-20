@@ -3929,6 +3929,7 @@ const Admin = (function() {
             'completed': 'Completed',
             'rescheduled': 'Rescheduled',
             'rescheduling_required': 'Reschedule Pending',
+            'absent': 'Absent',
             'draft': 'Draft',
             'submitted': 'Submitted for Review',
             'published': 'Approved & Published',
