@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from app.config import get_settings
 from app.api.v1.router import api_router
+from app import static_frontend
 
 settings = get_settings()
 
@@ -143,6 +144,10 @@ async def root():
         "version": settings.APP_VERSION,
         "status": "active"
     }
+
+
+# Same-origin frontend (static files + SPA fallback) under /academy/*
+app.include_router(static_frontend.router)
 
 
 @app.get("/health")
