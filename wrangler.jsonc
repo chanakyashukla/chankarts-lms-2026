@@ -1,0 +1,59 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "chankarts-lms",
+  "main": "worker/src/index.js",
+  "compatibility_date": "2026-10-20",
+  "upload_source_maps": true,
+  "observability": {
+    "enabled": true
+  },
+  // Static frontend served from the existing frontend/ directory.
+  // SPA fallback keeps deep links (/login, /admin, ...) working.
+  "assets": {
+    "directory": "./frontend",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": [
+      "/api",
+      "/api/*",
+      "/health",
+      "/docs",
+      "/docs/*",
+      "/redoc",
+      "/openapi.json"
+    ]
+  },
+  // The existing FastAPI application (root Dockerfile) runs unmodified
+  // in a single container instance; the Worker forwards API traffic to it.
+  "containers": [
+    {
+      "class_name": "LmsBackend",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "base": {
+          "dockerfile": "./Dockerfile"
+        }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "LMS_BACKEND",
+        "class_name": "LmsBackend"
+      }
+    ]
+  },
+  "exports": {
+    "LmsBackend": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "vars": {
+    // Non-secret configuration. Bucket/account come from the R2 bucket
+    // created in the Cloudflare dashboard; keys are Worker secrets.
+    "R2_BUCKET_NAME": "chankarts-lms-uploads",
+    "R2_ACCOUNT_ID": ""
+  }
+}

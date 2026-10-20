@@ -23,12 +23,22 @@
 (function () {
     'use strict';
 
-    var isPreviewHost = /\.github\.io$/i.test(location.hostname);
+    // Preview (demo) data mode is ONLY permitted on the GitHub Pages demo
+    // host and local development. The production domain (academy.chankarts.com
+    // or any other host) NEVER activates the browser-local demo adapter —
+    // there, every request goes to the real backend API.
+    var host = location.hostname;
+    var isPreviewHost = /\.github\.io$/i.test(host);
+    var isLocalDev = host === 'localhost' || host === '127.0.0.1';
     var forced = /[?&]preview=1/.test(location.search);
     var sticky = false;
     try { sticky = localStorage.getItem('chankarts-preview-on') === '1'; } catch (e) { /* ignore */ }
-    window.PREVIEW_MODE = !!(isPreviewHost || forced || sticky);
-    if (window.PREVIEW_MODE) { try { localStorage.setItem('chankarts-preview-on', '1'); } catch (e) { /* ignore */ } }
+    window.PREVIEW_MODE = !!(isPreviewHost || (isLocalDev && (forced || sticky)));
+    if (window.PREVIEW_MODE) {
+        try { localStorage.setItem('chankarts-preview-on', '1'); } catch (e) { /* ignore */ }
+    } else {
+        try { localStorage.removeItem('chankarts-preview-on'); } catch (e) { /* ignore */ }
+    }
     if (!window.PREVIEW_MODE) return; // real backend takes over
 
     var KEY = 'chankarts-lms-2026-preview-v1';
