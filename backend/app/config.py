@@ -5,6 +5,10 @@ from functools import lru_cache
 class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://user:password@localhost:5432/chankarts_academy"
+    # Optional: DIRECT (non-pooler) connection used ONLY by Alembic migrations.
+    # Application traffic always uses DATABASE_URL (pooled). When empty,
+    # migrations fall back to DATABASE_URL.
+    MIGRATIONS_DATABASE_URL: str = ""
     
     # JWT
     SECRET_KEY: str = "your-secret-key-change-in-production"

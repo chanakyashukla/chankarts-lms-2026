@@ -46,9 +46,14 @@ sufficient for an academy (a few MB holds thousands of students).
 
 1. **Workers Paid plan**: Cloudflare dashboard → Workers & Pages → Plan →
    upgrade to Workers Paid ($5/month). Required for Containers.
-2. **Neon database**: create a free project at neon.tech → copy the pooled
-   connection string → it becomes `DATABASE_URL`
-   (`postgresql+asyncpg://USER:PASSWORD@HOST/neondb?sslmode=require`).
+2. **Neon database**: use the pooled endpoint as `DATABASE_URL` with the
+   installed asyncpg driver:
+   `postgresql+asyncpg://USER:PASSWORD@HOST-pooler.REGION.aws.neon.tech/DBNAME?ssl=require`
+   (`?ssl=require` — NOT `sslmode=...`: asyncpg rejects libpq-only parameters;
+   verified live against both Neon endpoints). Optionally set
+   `MIGRATIONS_DATABASE_URL` to the direct/non-pooler endpoint for Alembic
+   (Neon guidance: migrations off the pooler); the application always
+   connects via the pooled `DATABASE_URL`.
 3. **R2 bucket**: Cloudflare dashboard → R2 → create bucket
    `chankarts-lms-uploads` → manage R2 API tokens → create a token with
    Object Read & Write scoped to that bucket → note the Access Key ID and

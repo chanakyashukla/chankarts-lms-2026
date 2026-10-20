@@ -12,15 +12,28 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     # Run migrations on startup (safe for non-Docker deploys)
     try:
+        import os as _os
         import subprocess
         import sys
-        subprocess.run(
+        # Migrations may use MIGRATIONS_DATABASE_URL (direct endpoint) while
+        # the application itself always connects via the pooled DATABASE_URL.
+        _env = dict(_os.environ)
+        if settings.MIGRATIONS_DATABASE_URL:
+            _env["MIGRATIONS_DATABASE_URL"] = settings.MIGRATIONS_DATABASE_URL
+        _run = subprocess.run(
             [sys.executable, "-m", "alembic", "upgrade", "head"],
             cwd=str(__import__("pathlib").Path(__file__).parent.parent),
-            check=True,
+            check=False,
             capture_output=True,
+            env=_env,
         )
-        print("Database migrations applied successfully")
+        if _run.returncode == 0:
+            print("Database migrations applied successfully")
+        else:
+            detail = (_run.stderr or b"").decode(errors="replace").strip()[-500:]
+            # Non-fatal: the additive schema bootstrap below still aligns the
+            # database with the models, but the real failure is now visible.
+            print(f"Migration warning (non-fatal): alembic exit {_run.returncode}: {detail}")
     except Exception as e:
         print(f"Migration warning (non-fatal): {e}")
 
