@@ -212,7 +212,7 @@ def coerce(value, colinfo: dict, model_col=None):
         return datetime.fromisoformat(str(value).replace("T", " ").split("+")[0].strip())
     if dt == "date":
         return date.fromisoformat(str(value)[:10])
-    if dt == "time":
+    if dt.startswith("time"):  # 'time' | 'time without time zone' | ...
         return time.fromisoformat(str(value))
     if dt == "boolean":
         return bool(int(value)) if not isinstance(value, bool) else value
@@ -296,15 +296,28 @@ async def main() -> None:
         to_insert = rows
         if rows:
             async with engine.connect() as conn:
-                ids = [r.get("id") for r in rows if r.get("id")]
+                ids = []
+                for r in rows:
+                    v = r.get("id")
+                    if v:
+                        try:
+                            ids.append(uuid.UUID(str(v)))  # source may store dashless hex
+                        except Exception:
+                            pass
                 if ids:
                     q = text(f'SELECT id FROM "{t}" WHERE id = ANY(:ids)')
                     try:
-                        found = {r[0] for r in (await conn.execute(q, {"ids": ids})).all()}
-                    except Exception:
+                        found = {str(r[0]) for r in (await conn.execute(q, {"ids": ids})).all()}
+                    except Exception as e:  # noqa: BLE001 — surface, never swallow
+                        print(f"  [warn] existence check failed for {t}: {type(e).__name__}: {str(e)[:120]}")
                         found = set()
-                    pk_existing = len(found)
-                    to_insert = [r for r in rows if r.get("id") not in found]
+                    # compare canonical forms (source strings may be dashless)
+                    pk_existing = sum(1 for r in rows
+                                      if str(r.get("id", "")).replace("-", "").lower()
+                                      in {f.replace("-", "").lower() for f in found})
+                    to_insert = [r for r in rows
+                                 if str(r.get("id", "")).replace("-", "").lower()
+                                 not in {f.replace("-", "").lower() for f in found}]
             if t in biz_rules:
                 col, existing = biz_rules[t]
                 keep, skip = [], 0
@@ -392,7 +405,9 @@ async def main() -> None:
                 blk = plan.get(t)
                 if not blk or not blk["insert"]:
                     continue
-                table = Table(t, md, autoload_with=conn)
+                table = await conn.run_sync(
+                    lambda sync_conn: Table(t, md, autoload_with=sync_conn)
+                )
                 cols_meta = meta[t]
                 for r in blk["insert"]:
                     vals = {}
@@ -404,10 +419,12 @@ async def main() -> None:
                         vals[c] = coerce(v, cols_meta[c], mcol)
                     stmt = pg_insert(table).values(**vals).on_conflict_do_nothing(index_elements=["id"])
                     try:
-                        res = await conn.execute(stmt)
+                        # savepoint per row: one bad row must not abort the batch
+                        async with conn.begin_nested():
+                            res = await conn.execute(stmt)
                         inserted_counts[t] = inserted_counts.get(t, 0) + (res.rowcount or 0)
                     except Exception as e:  # noqa: BLE001 — record + continue (rerunnable)
-                        failures.append(f"{t} id={r.get('id')}: {type(e).__name__}: {str(e)[:160]}")
+                        failures.append(f"{t} id={r.get('id')}: {type(e).__name__}: {str(e)[:200]}")
         emit("APPLY RESULTS (rows actually inserted):")
         for t in IMPORT_ORDER:
             if inserted_counts.get(t):
