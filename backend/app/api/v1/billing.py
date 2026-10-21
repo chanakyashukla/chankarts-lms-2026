@@ -2006,35 +2006,88 @@ async def financial_statement(
 async def export_statement(
     student_id: Optional[UUID] = None,
     family: bool = False,
+    month: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}$"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """CSV statement export (same scoping as /statement)."""
+    """Branded CSV fee statement (same scoping as /statement).
+
+    Student-facing document: academy header, plain-language column names and
+    amounts converted from paise to ₹.  Stored values are never modified.
+    """
     data = await financial_statement(student_id=student_id, family=family, db=db, current_user=current_user)
     import csv
     import io as _io
+
+    def inr(paise) -> str:
+        """Integer paise → ₹1,234.56 (blank for None — never invent values)."""
+        if paise is None or paise == "":
+            return ""
+        return f"₹{(int(paise) / 100):,.2f}"
+
+    def status_label(s) -> str:
+        return (s or "").replace("_", " ").title()
+
     buf = _io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["student", "type", "reference", "period/date", "description",
-                     "charged_paise", "paid_paise", "outstanding_paise", "status"])
+
+    names = [st["student_name"] or "" for st in data["students"]]
+    months = sorted({c["billing_month"] for st in data["students"] for c in st["charges"] if c.get("billing_month")})
+    if month:
+        period = month
+    elif len(months) == 1:
+        period = months[0]
+    else:
+        period = "All periods"
+
+    writer.writerow(["CHANKARTS MUSIC ACADEMY"])
+    writer.writerow(["Student Fee Statement"])
+    writer.writerow(["Student", "; ".join(n for n in names if n) or "-"])
+    writer.writerow(["Generated", date.today().isoformat()])
+    writer.writerow(["Statement Period", period])
+    writer.writerow(["Currency", "INR (₹)"])
+    writer.writerow([])
+
+    writer.writerow(["Student", "Transaction Type", "Reference", "Period / Date",
+                     "Description", "Amount Charged (₹)", "Amount Paid (₹)",
+                     "Outstanding (₹)", "Status"])
     for st in data["students"]:
+        name = st["student_name"] or ""
         for c in st["charges"]:
-            writer.writerow([st["student_name"], "charge", c["invoice_number"], c["billing_month"],
-                             (c.get("description") or c["charge_type"]),
-                             c["amount_paise"], c["amount_paid_paise"], c["outstanding_paise"], c["status"]])
+            if month and c.get("billing_month") and c["billing_month"] != month:
+                continue
+            writer.writerow([name, "Fee Charge", c["invoice_number"], c.get("billing_month") or "",
+                             (c.get("description") or str(c.get("charge_type") or "").replace("_", " ").title()),
+                             inr(c["amount_paise"]), inr(c["amount_paid_paise"] or 0),
+                             inr(c["outstanding_paise"]), status_label(c["status"])])
         for p in st["payments"]:
-            writer.writerow([st["student_name"], "payment", p["provider_payment_id"],
-                             (p["paid_at"] or "")[:10], p["method"] or p["provider"],
-                             -p["amount_paise"], "", "", p["status"]])
+            writer.writerow([name, "Payment", p.get("provider_payment_id") or "",
+                             (p.get("paid_at") or "")[:10],
+                             " ".join(x for x in [str(p.get("method") or p.get("provider") or "").title(),
+                                                  ("(reported)" if p.get("status") == "reported" else "")] if x),
+                             "", inr(p["amount_paise"]), "", status_label(p["status"])])
         for e in st["exam_fees"]:
-            writer.writerow([st["student_name"], "exam_fee", e["provider_reference"] or e["id"][:8],
-                             e["exam_session"] or "", f"{e['board'] or ''} {e['grade_level'] or ''}",
-                             e["fee_charged_paise"], e["reimbursed_paise"],
-                             e["reimbursement_balance_paise"], e["status"]])
-        writer.writerow([st["student_name"], "credit_balance", "", "", "",
-                         "", "", st["totals"]["credit_balance_paise"], ""])
-    return Response(buf.getvalue(), media_type="text/csv",
-                    headers={"Content-Disposition": "attachment; filename=statement.csv"})
+            writer.writerow([name, "Exam Fee", e.get("provider_reference") or str(e.get("id", ""))[:8],
+                             e.get("exam_session") or "",
+                             " ".join(x for x in [e.get("board") or "", e.get("grade_level") or ""] if x).strip(),
+                             inr(e.get("fee_charged_paise")), inr(e.get("reimbursed_paise")),
+                             inr(e.get("reimbursement_balance_paise")), status_label(e.get("status"))])
+        credit = st["totals"].get("credit_balance_paise") or 0
+        writer.writerow([name, "Available Credit Balance", "", "",
+                         "Credit available toward future charges" if credit else "",
+                         "", "", inr(credit), "Credit" if credit else ""])
+
+    # summary row (charge-based totals; credit shown separately above)
+    t = data["totals"]
+    writer.writerow([])
+    writer.writerow(["", "TOTAL", "", "", "", inr(t["charged_paise"]), inr(t["paid_paise"]),
+                     inr(t["outstanding_paise"]), ""])
+    writer.writerow(["", "Available Credit Balance", "", "", "", "", "", inr(t["credit_balance_paise"]), ""])
+
+    # UTF-8 BOM so ₹ renders correctly in Excel
+    csv_text = "\ufeff" + buf.getvalue()
+    return Response(csv_text, media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": "attachment; filename=chankarts-fee-statement.csv"})
 
 
 # ==================================================================

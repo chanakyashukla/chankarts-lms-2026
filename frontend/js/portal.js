@@ -1303,7 +1303,7 @@ const Portal = (function () {
                     (r.faculty_note ? ' · ' + esc(r.faculty_note) : '') + '</div></div>' +
                     '<div class="list__actions">' +
                     (r.external_url
-                        ? '<a class="btn-p btn-p--sm btn-p--ghost" href="' + esc(r.external_url) + '" target="_blank" rel="noopener">Buy Link</a>'
+                        ? '<a class="btn-p btn-p--sm btn-p--ghost" href="' + esc(r.external_url) + '" target="_blank" rel="noopener">Link</a>'
                         : '<span class="list__sub">Ask faculty</span>') +
                     '</div></div>';
             }).join('');

@@ -3383,6 +3383,10 @@ const Admin = (function() {
         error: null,
         data: {},
         remarkEditingId: null,
+        scheduleMonth: null,
+        pendingSlots: [],
+        scheduleConflicts: [],
+        scheduleNotice: '',
     };
 
     const WS_TABS = [
@@ -3438,10 +3442,15 @@ const Admin = (function() {
         try {
             switch (tab) {
                 case 'classes': {
-                    const [sessions, allSchedules, requests] = await Promise.all([
+                    if (!studentWs.scheduleMonth) {
+                        studentWs.scheduleMonth = new Date().toISOString().slice(0, 7);
+                    }
+                    const [sessions, allSchedules, requests, monthly, instructors] = await Promise.all([
                         apiV1Call(`/sessions?student_id=${sid}&limit=300`),
                         apiCall('/schedules'),
                         apiV1Call(`/sessions/reschedule-requests`),
+                        apiCall(`/students/${sid}/monthly-schedule?month=${studentWs.scheduleMonth}`).catch(() => null),
+                        apiCall('/instructors').catch(() => []),
                     ]);
                     const todayIso = new Date().toISOString().slice(0, 10);
                     studentWs.data.classes = {
@@ -3451,6 +3460,9 @@ const Admin = (function() {
                         upcoming: (sessions || []).filter(x =>
                             x.scheduled_date >= todayIso &&
                             ['scheduled', 'rescheduling_required'].includes(x.status)),
+                        monthly: monthly,
+                        instructors: (instructors || []).filter(i => i.is_active !== false),
+                        month: studentWs.scheduleMonth,
                     };
                     break;
                 }
@@ -3670,7 +3682,66 @@ const Admin = (function() {
                     : (x.status === 'rescheduling_required' ? 'in queue' : '—')}</td>
             </tr>`).join('');
 
+        const monthly = (data && data.monthly) || null;
+        const instructors = (data && data.instructors) || [];
+        const month = (studentWs.scheduleMonth || new Date().toISOString().slice(0, 7));
+        const exp = monthly && monthly.plan ? monthly.plan.classes_expected : null;
+        const counts = (monthly && monthly.counts) || {};
+        const monthSessions = (monthly && monthly.sessions) || [];
+        const remaining = monthly ? monthly.remaining : null;
+        const pending = studentWs.pendingSlots || [];
+        const conflicts = studentWs.scheduleConflicts || [];
+        const instDefault = monthly && monthly.enrollments && monthly.enrollments.find(e => e.instructor_id);
         el.innerHTML = `
+            <h3 style="margin-bottom:12px;">Monthly Schedule</h3>
+            <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin-bottom:10px;font-size:0.9rem;">
+                <label>Month <input type="month" id="wsMonthInput" value="${month}" onchange="Admin.wsChangeMonth(this.value)" style="margin-left:6px"></label>
+                <span>Plan: <b>${(monthly && monthly.plan && monthly.plan.label) || 'not set (4 or 8 classes)'}</b></span>
+                <span>Expected: <b>${exp != null ? exp : '—'}</b></span>
+                <span>Scheduled: <b>${(counts.scheduled || 0) + (counts.needs_reschedule || 0)}</b></span>
+                <span>Completed: <b>${counts.completed || 0}</b></span>
+                <span>Remaining: <b>${remaining != null ? remaining : '—'}</b></span>
+                <button class="btn btn--secondary btn--sm" onclick="Admin.wsMonthlyReload()">Refresh</button>
+            </div>
+            ${monthly && monthly.existing_conflicts && monthly.existing_conflicts.length
+                ? `<div style="color:var(--color-warning);font-size:0.85rem;margin-bottom:8px">${monthly.existing_conflicts.map(c => '⚠ ' + escapeHtml(c.message)).join('<br>')}</div>` : ''}
+            ${monthSessions.length ? `<table class="admin-table" style="margin-bottom:14px"><thead><tr><th>Date</th><th>Time</th><th>Status</th><th>Counts</th></tr></thead><tbody>
+                ${monthSessions.map(x => `<tr style="${x.status === 'completed' ? 'opacity:0.65' : ''}">
+                    <td>${formatDate(x.date)}</td><td>${(x.start || '').slice(0,5)}–${(x.end || '').slice(0,5)}</td>
+                    <td><span class="badge badge--${getStatusBadgeClass(x.status)}">${formatStatus(x.status)}</span></td>
+                    <td>${x.counts ? '✓' : '—'}</td></tr>`).join('')}
+                </tbody></table>`
+                : '<p class="admin-empty__text" style="margin-bottom:10px">No classes scheduled for this month yet</p>'}
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0">
+                <label>Instructor
+                    <select id="wsInstSelect" style="margin-left:6px">
+                        ${instructors.map(i => `<option value="${i.id}" ${instDefault && instDefault.instructor_id === i.id ? 'selected' : ''}>${escapeHtml(i.full_name || i.first_name || i.username || i.id)}</option>`).join('')}
+                    </select>
+                </label>
+                <button class="btn btn--secondary btn--sm" onclick="Admin.wsAddSlot()">+ Add class slot</button>
+                <span style="display:inline-flex;gap:6px;align-items:center">
+                    <select id="wsGenDay">${['monday','tuesday','wednesday','thursday','friday','saturday','sunday'].map((d, ix) => `<option value="${ix}">${d.charAt(0).toUpperCase()+d.slice(1)}</option>`).join('')}</select>
+                    <input type="time" id="wsGenStart" value="17:00">
+                    <input type="time" id="wsGenEnd" value="18:00">
+                    <button class="btn btn--secondary btn--sm" onclick="Admin.wsGenerateWeekly()">Generate remaining (weekly)</button>
+                </span>
+            </div>
+            ${pending.length ? `<table class="admin-table" id="wsPendingTable" style="margin-bottom:10px"><thead><tr><th>Date</th><th>Start</th><th>End</th><th></th></tr></thead><tbody>
+                ${pending.map((p, ix) => `<tr>
+                    <td><input type="date" data-slot-date value="${p.date || ''}"></td>
+                    <td><input type="time" data-slot-start value="${p.start || ''}"></td>
+                    <td><input type="time" data-slot-end value="${p.end || ''}"></td>
+                    <td><button class="btn btn--secondary btn--sm" onclick="Admin.wsRemoveSlot(${ix})">Remove</button></td>
+                </tr>`).join('')}
+                </tbody></table>`
+                : ''}
+            ${conflicts.length ? `<div style="border:1px solid var(--color-warning);border-radius:8px;padding:10px;margin-bottom:10px;color:var(--color-warning);font-size:0.85rem">
+                <b>Scheduling conflicts — nothing was saved:</b><br>${conflicts.map(c => '• ' + escapeHtml(c.message)).join('<br>')}</div>` : ''}
+            ${studentWs.scheduleNotice ? `<div style="color:var(--color-success, #2E7D32);font-size:0.85rem;margin-bottom:10px">${escapeHtml(studentWs.scheduleNotice)}</div>` : ''}
+            <div style="margin-bottom:22px">
+                <button class="btn btn--primary btn--sm" onclick="Admin.wsSaveMonthly()">Save schedule</button>
+                <span style="font-size:0.78rem;color:var(--color-text-muted,#706B60);margin-left:8px">Conflicting slots block saving; completed classes are never changed.</span>
+            </div>
             <h3 style="margin-bottom:12px;">Fixed Weekly Timetable</h3>
             ${schedules.length ? `<table class="admin-table"><thead><tr><th>Day</th><th>Time</th><th>Instrument</th><th>Instructor</th><th>Status</th><th></th></tr></thead>
                 <tbody>${schedRows}</tbody></table>`
@@ -4505,6 +4576,124 @@ const Admin = (function() {
                 else if (typeof loadStudents === 'function') loadStudents();
             }
         } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    // ========================================
+    // Monthly class scheduling (4 / 8 classes per month)
+    // ========================================
+    async function wsChangeMonth(v) {
+        studentWs.scheduleMonth = v;
+        studentWs.pendingSlots = [];
+        studentWs.scheduleConflicts = [];
+        studentWs.scheduleNotice = '';
+        delete studentWs.data.classes;
+        await loadWsTab('classes');
+        render();
+    }
+
+    async function wsMonthlyReload() {
+        await wsChangeMonth(studentWs.scheduleMonth);
+    }
+
+    function wsCollectSlots() {
+        const rows = document.querySelectorAll('#wsPendingTable tbody tr');
+        if (!rows.length) return;
+        const out = [];
+        rows.forEach(tr => {
+            out.push({
+                date: (tr.querySelector('[data-slot-date]') || {}).value || '',
+                start: (tr.querySelector('[data-slot-start]') || {}).value || '',
+                end: (tr.querySelector('[data-slot-end]') || {}).value || '',
+            });
+        });
+        studentWs.pendingSlots = out;
+    }
+
+    function wsAddSlot() {
+        wsCollectSlots();
+        studentWs.pendingSlots.push({ date: '', start: '17:00', end: '18:00' });
+        render();
+    }
+
+    function wsRemoveSlot(ix) {
+        wsCollectSlots();
+        studentWs.pendingSlots.splice(ix, 1);
+        render();
+    }
+
+    function wsGenerateWeekly() {
+        wsCollectSlots();
+        const monthly = (studentWs.data.classes || {}).monthly;
+        const count = monthly && monthly.remaining != null ? monthly.remaining : 4;
+        const month = studentWs.scheduleMonth;
+        const dayIx = parseInt((document.getElementById('wsGenDay') || {}).value || '0', 10);
+        const start = (document.getElementById('wsGenStart') || {}).value || '17:00';
+        const end = (document.getElementById('wsGenEnd') || {}).value || '18:00';
+        const today = new Date().toISOString().slice(0, 10);
+        const gen = [];
+        const [y, m] = month.split('-').map(Number);
+        const lastDay = new Date(y, m, 0).getDate();
+        const want = (dayIx + 1) % 7; // select Monday=0 → JS getDay()
+        for (let d = 1; d <= lastDay && gen.length < count; d++) {
+            const iso = `${month}-${String(d).padStart(2, '0')}`;
+            if (new Date(iso + 'T12:00:00').getDay() === want && iso >= today) {
+                gen.push({ date: iso, start, end });
+            }
+        }
+        if (!gen.length) {
+            showToast(`No future ${['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'][dayIx]}s left in ${month}`, 'error');
+            return;
+        }
+        studentWs.pendingSlots = studentWs.pendingSlots.concat(gen);
+        render();
+    }
+
+    async function wsSaveMonthly() {
+        wsCollectSlots();
+        const sid = studentWs.studentId;
+        const slots = (studentWs.pendingSlots || []).filter(p => p.date && p.start && p.end);
+        studentWs.scheduleConflicts = [];
+        studentWs.scheduleNotice = '';
+        if (!slots.length) {
+            showToast('Add at least one class slot first', 'error');
+            return;
+        }
+        const instSel = document.getElementById('wsInstSelect');
+        const body = {
+            month: studentWs.scheduleMonth,
+            instructor_id: instSel && instSel.value ? instSel.value : undefined,
+            classes: slots.map(p => ({ date: p.date, start_time: p.start, end_time: p.end })),
+        };
+        try {
+            const token = localStorage.getItem('academy_token');
+            const resp = await fetch(apiOrigin() + `/api/v1/admin/students/${sid}/monthly-schedule`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+                },
+                body: JSON.stringify(body),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                if (data.detail && data.detail.conflicts) {
+                    studentWs.scheduleConflicts = data.detail.conflicts;
+                    render(); // keep pending slots for editing
+                    return;
+                }
+                showToast((data.detail && data.detail.message) || (typeof data.detail === 'string' ? data.detail : 'Save failed'), 'error');
+                return;
+            }
+            studentWs.pendingSlots = [];
+            studentWs.scheduleNotice = `Saved ${data.scheduled.length} class(es) for ${body.month}` +
+                (data.skipped_duplicates ? ` (${data.skipped_duplicates} already existed — skipped)` : '') +
+                (data.remaining != null ? `. Remaining to schedule: ${data.remaining}` : '.');
+            delete studentWs.data.classes;
+            await loadWsTab('classes');
+            render();
+        } catch (e) {
+            showToast(e.message || 'Save failed', 'error');
+        }
     }
 
     // ========================================
@@ -5877,6 +6066,12 @@ const Admin = (function() {
         deleteStudentPermanently(id) {
             deleteStudentPermanently(id);
         },
+        wsChangeMonth(v) { wsChangeMonth(v); },
+        wsMonthlyReload() { wsMonthlyReload(); },
+        wsAddSlot() { wsAddSlot(); },
+        wsRemoveSlot(ix) { wsRemoveSlot(ix); },
+        wsGenerateWeekly() { wsGenerateWeekly(); },
+        wsSaveMonthly() { wsSaveMonthly(); },
         createInstructorModal() {
             createInstructorModal();
         },

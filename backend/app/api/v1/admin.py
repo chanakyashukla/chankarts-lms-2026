@@ -28,6 +28,7 @@ from app.services.notifications import notify_user
 from app.services.email import email_service
 from app.config import get_settings
 import secrets
+import uuid
 from datetime import time as dtime
 from app.models.pin_reset import PinResetRequest, PinResetRequestStatus
 from app.models.session import ClassSession, SessionStatus, SessionStatusHistory
@@ -1526,6 +1527,321 @@ async def admin_delete_student(
         "released": {"username": released_username, "cma_registration_id": released_reg},
         "removed": impact["remove"],
         "retained_unlinked": impact["retain_unlinked"],
+    }
+
+
+# ========================================
+# Monthly class scheduling (4 or 8 classes / month) with conflict detection
+# ========================================
+_MONTH_FMT = r"^\d{4}-\d{2}$"
+_MONTH_NAMES = ["", "January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December"]
+
+
+def _expected_classes(fee_plan: Optional[str]) -> Optional[int]:
+    return {"4_classes": 4, "8_classes": 8}.get(fee_plan or "")
+
+
+def _fmt12(t: dtime) -> str:
+    h = t.hour % 12 or 12
+    return f"{h}:{t.minute:02d} {'AM' if t.hour < 12 else 'PM'}"
+
+
+def _slot_overlaps(a_s: dtime, a_e: dtime, b_s: dtime, b_e: dtime) -> bool:
+    # overlapping intervals (not merely identical start times)
+    return a_s < b_e and a_e > b_s
+
+
+async def _resolve_student_enrollment(db: AsyncSession, student, enrollment_id: Optional[UUID]) -> Enrollment:
+    q = select(Enrollment).where(Enrollment.student_id == student.id)
+    if enrollment_id:
+        q = q.where(Enrollment.id == enrollment_id)
+    else:
+        q = q.where(Enrollment.status == "active")
+    rows = (await db.execute(q.order_by(Enrollment.created_at.asc()))).scalars().all()
+    if not rows:
+        raise HTTPException(status_code=400,
+                            detail="No active enrolment for this student — create or activate an enrolment first")
+    if len(rows) > 1 and not enrollment_id:
+        raise HTTPException(status_code=400,
+                            detail="Student has multiple enrolments — choose which enrolment to schedule")
+    return rows[0]
+
+
+class MonthlyClassIn(BaseModel):
+    date: str                 # YYYY-MM-DD
+    start_time: str           # HH:MM
+    end_time: str             # HH:MM
+    instructor_id: Optional[UUID] = None
+
+
+class MonthlyScheduleSave(BaseModel):
+    month: str
+    enrollment_id: Optional[UUID] = None
+    instructor_id: Optional[UUID] = None
+    classes: list[MonthlyClassIn]
+
+
+@router.get("/students/{student_id}/monthly-schedule")
+async def admin_monthly_schedule(
+    student_id: UUID,
+    month: str = Query(..., pattern=_MONTH_FMT),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Review state for one month: plan expectation vs scheduled /
+    completed / remaining classes, plus any existing overlaps."""
+    student = (await db.execute(select(Student).where(Student.id == student_id))).scalar_one_or_none()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    enrollments = (await db.execute(
+        select(Enrollment).where(Enrollment.student_id == student_id)
+        .order_by(Enrollment.created_at.asc()))).scalars().all()
+    fee_plan = next((e.fee_plan for e in enrollments if e.fee_plan), None)
+    expected = _expected_classes(fee_plan)
+
+    year, mon = (int(x) for x in month.split("-"))
+    first = date(year, mon, 1)
+    import calendar as _cal
+    last = date(year, mon, _cal.monthrange(year, mon)[1])
+
+    sessions = (await db.execute(
+        select(ClassSession).where(ClassSession.student_id == student_id,
+                                   ClassSession.scheduled_date >= first,
+                                   ClassSession.scheduled_date <= last)
+        .order_by(ClassSession.scheduled_date, ClassSession.scheduled_start))).scalars().all()
+
+    def sess_out(s):
+        return {"id": str(s.id), "date": s.scheduled_date.isoformat(),
+                "start": s.scheduled_start.strftime("%H:%M"), "end": s.scheduled_end.strftime("%H:%M"),
+                "status": s.status, "enrollment_id": str(s.enrollment_id),
+                "instructor_id": str(s.instructor_id) if s.instructor_id else None,
+                "counts": bool(s.counts_toward_package)}
+
+    active = [s for s in sessions if s.status != "cancelled"]
+    counts = {
+        "scheduled": sum(1 for s in active if s.status in ("scheduled", "rescheduled")),
+        "completed": sum(1 for s in active if s.status == "completed"),
+        "needs_reschedule": sum(1 for s in active if s.status == "rescheduling_required"),
+        "cancelled": sum(1 for s in sessions if s.status == "cancelled"),
+    }
+    remaining = max((expected or 0) - len(active), 0) if expected else None
+
+    # existing overlaps inside this month (data hygiene — reported, never auto-fixed)
+    existing_conflicts = []
+    for i, a in enumerate(active):
+        for b in active[i + 1:]:
+            if a.scheduled_date == b.scheduled_date and _slot_overlaps(
+                    a.scheduled_start, a.scheduled_end, b.scheduled_start, b.scheduled_end):
+                existing_conflicts.append({
+                    "type": "existing_overlap",
+                    "date": a.scheduled_date.isoformat(),
+                    "message": f"Existing classes overlap on {a.scheduled_date.day} {_MONTH_NAMES[a.scheduled_date.month]}, "
+                               f"{_fmt12(a.scheduled_start)}-{_fmt12(a.scheduled_end)} and "
+                               f"{_fmt12(b.scheduled_start)}-{_fmt12(b.scheduled_end)}.",
+                })
+    return {
+        "month": month,
+        "plan": {"fee_plan": fee_plan, "classes_expected": expected,
+                 "label": {4: "4 classes / month", 8: "8 classes / month"}.get(expected, None)},
+        "enrollments": [{"id": str(e.id), "programme_name": e.programme_name, "fee_plan": e.fee_plan,
+                         "status": e.status,
+                         "instructor_id": str(e.instructor_id) if e.instructor_id else None} for e in enrollments],
+        "sessions": [sess_out(s) for s in sessions],
+        "counts": counts,
+        "scheduled_total": len(active),
+        "remaining": remaining,
+        "existing_conflicts": existing_conflicts,
+    }
+
+
+@router.post("/students/{student_id}/monthly-schedule")
+async def admin_save_monthly_schedule(
+    student_id: UUID,
+    body: MonthlyScheduleSave,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Save a month's class slots after conflict checking.
+
+    Conflicts (instructor busy, student busy, overlapping interval, weekly
+    timetable clashes) block the whole request with specific messages —
+    nothing is silently moved or replaced.  Exact duplicates of already
+    existing sessions are skipped so re-saving is idempotent.  Completed
+    sessions are never modified.
+    """
+    student = (await db.execute(select(Student).where(Student.id == student_id))).scalar_one_or_none()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    enrollment = await _resolve_student_enrollment(db, student, body.enrollment_id)
+
+    try:
+        year, mon = (int(x) for x in body.month.split("-"))
+        first = date(year, mon, 1)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="month must be YYYY-MM")
+    import calendar as _cal
+    last = date(year, mon, _cal.monthrange(year, mon)[1])
+    if not (1 <= mon <= 12):
+        raise HTTPException(status_code=400, detail="month must be YYYY-MM")
+
+    if not body.classes:
+        raise HTTPException(status_code=400, detail="No class slots provided")
+
+    default_instructor = body.instructor_id or enrollment.instructor_id
+    if not default_instructor:
+        raise HTTPException(status_code=400,
+                            detail="Assign an instructor to the enrolment before scheduling classes")
+
+    # parse + validate rows
+    parsed: list[tuple[date, dtime, dtime, Optional[UUID]]] = []
+    seen_slots = set()
+    for c in body.classes:
+        try:
+            d = date.fromisoformat(c.date)
+            s_t = dtime.fromisoformat(c.start_time)
+            e_t = dtime.fromisoformat(c.end_time)
+        except ValueError:
+            raise HTTPException(status_code=400,
+                                detail=f"Invalid class slot: {c.date} {c.start_time}-{c.end_time} "
+                                       "(use YYYY-MM-DD and HH:MM)")
+        if not (first <= d <= last):
+            raise HTTPException(status_code=400,
+                                detail=f"{d.isoformat()} is outside the selected month {body.month}")
+        if s_t >= e_t:
+            raise HTTPException(status_code=400,
+                                detail=f"End time must be after start time on {d.isoformat()}")
+        inst = c.instructor_id or default_instructor
+        key = (d.isoformat(), s_t.isoformat())
+        if key in seen_slots:
+            raise HTTPException(status_code=400,
+                                detail=f"Duplicate slot in request: {d.isoformat()} {_fmt12(s_t)}")
+        seen_slots.add(key)
+        parsed.append((d, s_t, e_t, inst))
+
+    # ---- conflict detection (whole request blocked if any conflict) ----
+    conflicts: list[dict] = []
+    to_insert: list[tuple] = []
+    skipped_duplicates = 0
+
+    # existing sessions for this student + for each instructor involved
+    student_sessions = (await db.execute(
+        select(ClassSession).where(ClassSession.student_id == student_id,
+                                   ClassSession.scheduled_date >= first,
+                                   ClassSession.scheduled_date <= last,
+                                   ClassSession.status != "cancelled"))).scalars().all()
+    inst_ids = {p[3] for p in parsed if p[3]}
+    instr_sessions = (await db.execute(
+        select(ClassSession).where(ClassSession.instructor_id.in_(list(inst_ids)),
+                                   ClassSession.scheduled_date >= first,
+                                   ClassSession.scheduled_date <= last,
+                                   ClassSession.status != "cancelled"))).scalars().all() if inst_ids else []
+    # weekly timetables: this student's + the involved instructors'
+    student_enr_ids = [e.id for e in (await db.execute(
+        select(Enrollment).where(Enrollment.student_id == student_id))).scalars().all()]
+    student_weekly = (await db.execute(
+        select(ClassSchedule).where(ClassSchedule.enrollment_id.in_(student_enr_ids),
+                                    ClassSchedule.is_active.is_(True)))).scalars().all() if student_enr_ids else []
+    instr_weekly = (await db.execute(
+        select(ClassSchedule).where(ClassSchedule.instructor_id.in_(list(inst_ids)),
+                                    ClassSchedule.is_active.is_(True)))).scalars().all() if inst_ids else []
+
+    _DAY_ORDER = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+    for d, s_t, e_t, inst in parsed:
+        # exact duplicate of an already existing session → skip (idempotent save)
+        dup = any(sd.scheduled_date == d and sd.scheduled_start == s_t
+                  for sd in student_sessions)
+        if dup:
+            skipped_duplicates += 1
+            continue
+        before = len(conflicts)
+
+        # student busy?
+        for ss in student_sessions:
+            if ss.scheduled_date == d and _slot_overlaps(s_t, e_t, ss.scheduled_start, ss.scheduled_end):
+                conflicts.append({
+                    "type": "student", "date": d.isoformat(),
+                    "message": f"{student.full_name} already has a class scheduled on {d.day} "
+                               f"{_MONTH_NAMES[d.month]}, {_fmt12(s_t)}-{_fmt12(e_t)}.",
+                })
+                break
+        # instructor busy (any student)?
+        for isess in instr_sessions:
+            if isess.student_id != student_id and isess.scheduled_date == d \
+                    and _slot_overlaps(s_t, e_t, isess.scheduled_start, isess.scheduled_end):
+                conflicts.append({
+                    "type": "instructor", "date": d.isoformat(),
+                    "message": f"This instructor already has a class scheduled on {d.day} "
+                               f"{_MONTH_NAMES[d.month]}, {_fmt12(s_t)}-{_fmt12(e_t)}.",
+                })
+                break
+        # weekly timetable clashes (overlap with recurring rows)
+        day_name = _DAY_ORDER[d.weekday()]
+        for w in instr_weekly:
+            if w.day_of_week == day_name and _slot_overlaps(s_t, e_t, w.start_time, w.end_time):
+                conflicts.append({
+                    "type": "instructor_weekly", "date": d.isoformat(),
+                    "message": f"This instructor already has a weekly class on {day_name.capitalize()}s, "
+                               f"{_fmt12(s_t)}-{_fmt12(e_t)} (recurring timetable).",
+                })
+                break
+        for w in student_weekly:
+            if w.day_of_week == day_name and _slot_overlaps(s_t, e_t, w.start_time, w.end_time):
+                conflicts.append({
+                    "type": "student_weekly", "date": d.isoformat(),
+                    "message": f"{student.full_name} already has a weekly class on {day_name.capitalize()}s, "
+                               f"{_fmt12(s_t)}-{_fmt12(e_t)} (recurring timetable).",
+                })
+                break
+
+        if len(conflicts) == before:
+            to_insert.append((d, s_t, e_t, inst))
+
+    if conflicts:
+        raise HTTPException(status_code=409, detail={
+            "message": "Scheduling conflicts must be resolved before saving.",
+            "conflicts": conflicts,
+        })
+
+    # ---- insert (children of this student only; completed sessions untouched) ----
+    created_rows = []
+    for d, s_t, e_t, inst in to_insert:
+        row = ClassSession(
+            id=uuid.uuid4(), enrollment_id=enrollment.id, student_id=student_id,
+            instructor_id=inst, scheduled_date=d, scheduled_start=s_t, scheduled_end=e_t,
+            status=SessionStatus.SCHEDULED, billing_month=body.month,
+            counts_toward_package=True, created_by=current_user.id,
+        )
+        db.add(row)
+        created_rows.append(row)
+    await db.flush()
+
+    # recompute monthly totals after save
+    active_after = (await db.execute(
+        select(func.count(ClassSession.id)).where(
+            ClassSession.student_id == student_id,
+            ClassSession.scheduled_date >= first, ClassSession.scheduled_date <= last,
+            ClassSession.status != "cancelled"))).scalar() or 0
+    expected = _expected_classes(enrollment.fee_plan)
+    remaining = max((expected or 0) - active_after, 0) if expected else None
+
+    await record_audit(
+        db, action="student.schedule_saved", entity_type="student", entity_id=str(student_id),
+        actor_user_id=current_user.id, actor_role=current_user.role.value,
+        summary=f"Scheduled {len(created_rows)} class(es) for {body.month} "
+                f"({enrollment.fee_plan or 'plan unset'}; month total {active_after}"
+                f"{f'/{expected}' if expected else ''})",
+    )
+    return {
+        "scheduled": [{"date": r.scheduled_date.isoformat(),
+                       "start": r.scheduled_start.strftime("%H:%M"),
+                       "end": r.scheduled_end.strftime("%H:%M"),
+                       "id": str(r.id)} for r in created_rows],
+        "skipped_duplicates": skipped_duplicates,
+        "month_total": active_after,
+        "classes_expected": expected,
+        "remaining": remaining,
     }
 
 
