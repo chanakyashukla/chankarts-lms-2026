@@ -45,8 +45,10 @@ class Invoice(Base):
     invoice_number = Column(String(30), unique=True, nullable=False, index=True)  # CMA/INV/YYYY/MMMM
 
     fee_record_id = Column(UUID(as_uuid=True), ForeignKey("fee_records.id", ondelete="SET NULL"), nullable=True, index=True)
-    enrollment_id = Column(UUID(as_uuid=True), ForeignKey("enrollments.id", ondelete="CASCADE"), nullable=False, index=True)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False, index=True)
+    # nullable so permanent student deletion can RETAIN the invoice with the
+    # student/enrollment link released (documented financial-retention strategy)
+    enrollment_id = Column(UUID(as_uuid=True), ForeignKey("enrollments.id", ondelete="SET NULL"), nullable=True, index=True)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="SET NULL"), nullable=True, index=True)
     package_id = Column(UUID(as_uuid=True), ForeignKey("fee_packages.id", ondelete="SET NULL"), nullable=True)
 
     billing_month = Column(String(7), nullable=False, index=True)  # YYYY-MM
@@ -142,8 +144,8 @@ class PaymentAllocation(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     payment_id = Column(UUID(as_uuid=True), ForeignKey("payments.id", ondelete="CASCADE"), nullable=False, index=True)
     invoice_id = Column(UUID(as_uuid=True), ForeignKey("invoices.id", ondelete="CASCADE"), nullable=False, index=True)
-    enrollment_id = Column(UUID(as_uuid=True), ForeignKey("enrollments.id", ondelete="CASCADE"), nullable=False, index=True)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False, index=True)
+    enrollment_id = Column(UUID(as_uuid=True), ForeignKey("enrollments.id", ondelete="SET NULL"), nullable=True, index=True)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="SET NULL"), nullable=True, index=True)
 
     amount_paise = Column(Integer, nullable=False)
     allocated_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))

@@ -1421,7 +1421,7 @@ const Admin = (function() {
                                                     ? `<button class="btn btn--secondary btn--sm" onclick="event.stopPropagation();Admin.setStudentStatus('${s.id}','suspended')">Suspend</button>`
                                                     : `<button class="btn btn--secondary btn--sm" onclick="event.stopPropagation();Admin.setStudentStatus('${s.id}','active')">Reactivate</button>`}
                                                 <button class="btn btn--secondary btn--sm" onclick="event.stopPropagation();Admin.archiveStudent('${s.id}')">Archive</button>
-                                                <button class="btn btn--secondary btn--sm" onclick="event.stopPropagation();Admin.deleteStudentSafe('${s.id}')">Delete</button>
+                                                <button class="btn btn--secondary btn--sm" onclick="event.stopPropagation();Admin.deleteStudentPermanently('${s.id}')">Delete permanently</button>
                                             </td>
                                         </tr>
                                     `).join('')}
@@ -3535,7 +3535,7 @@ const Admin = (function() {
                         ? `<button class="btn btn--secondary btn--sm" onclick="Admin.wsSetStatus('${s.id}','suspended')">Suspend</button>`
                         : `<button class="btn btn--secondary btn--sm" onclick="Admin.wsSetStatus('${s.id}','active')">Reactivate</button>`}
                     <button class="btn btn--secondary btn--sm" onclick="Admin.archiveStudent('${s.id}')">Archive</button>
-                    <button class="btn btn--secondary btn--sm" onclick="Admin.deleteStudentSafe('${s.id}')">Delete</button>
+                    <button class="btn btn--secondary btn--sm" onclick="Admin.deleteStudentPermanently('${s.id}')">Delete permanently</button>
                 </div>
             </div>
             <div class="ws-tabs">${tabsHtml}</div>
@@ -4466,15 +4466,45 @@ const Admin = (function() {
         } catch (e) { showToast(e.message, 'error'); }
     }
 
-    async function deleteStudentSafe(id) {
-        if (!window.confirm('Delete this student? Only accounts WITHOUT any enrolment/class/academic history can be deleted. Otherwise use Archive.')) return;
+    async function deleteStudentPermanently(id) {
+        let impact;
         try {
-            await apiCall(`/students/${id}`, { method: 'DELETE' });
-            showToast('Student deleted', 'success');
-            renderStudents();
-        } catch (e) {
-            showToast(e.message, 'error');   // 409 with archive guidance is surfaced as-is
+            impact = await apiCall(`/students/${id}/delete-impact`);
+        } catch (e) { showToast(e.message, 'error'); return; }
+        if (!impact) return;
+
+        const s = impact.student || {};
+        const remove = impact.remove || {};
+        const retain = impact.retain_unlinked || {};
+        const removedLines = Object.entries(remove)
+            .filter(([, n]) => n > 0)
+            .map(([k, n]) => `  • ${k.replaceAll('_', ' ')}: ${n}`)
+            .join('\n');
+        const retainedFinancial = Object.entries(retain)
+            .filter(([k, n]) => n > 0 && ['invoices', 'fee_records', 'payment_allocations', 'credit_ledger', 'exam_fees'].includes(k))
+            .map(([k, n]) => `  • ${k.replaceAll('_', ' ')}: ${n} (kept for accounting, student link removed)`)
+            .join('\n');
+
+        let msg = `PERMANENTLY DELETE ${s.full_name || 'this student'} (${s.cma_registration_id || ''})?\n\n`;
+        msg += 'This cannot be undone. The login username and CMA registration ID will be freed for reuse.\n';
+        if (removedLines) msg += `\nRecords that will be REMOVED:\n${removedLines}\n`;
+        if (retainedFinancial) msg += `\nRecords RETAINED (unlinked):\n${retainedFinancial}\n`;
+        if (impact.archive_recommended) {
+            msg += '\nRecommendation: ARCHIVING is safer — it keeps this history without deleting anything (Archive button). ';
+            msg += 'Choose permanent deletion only for incorrect, duplicate or test profiles.\n';
         }
+        msg += '\nPress OK to delete PERMANENTLY, or Cancel to keep the student.';
+        if (!window.confirm(msg)) return;
+
+        try {
+            const res = await apiCall(`/students/${id}`, { method: 'DELETE' });
+            if (res && res.deleted) {
+                const freed = (res.released && res.released.username) || '';
+                showToast(`Student permanently deleted${freed ? ` — login "${freed}" freed` : ''}`, 'success');
+                if (typeof renderStudents === 'function') renderStudents();
+                else if (typeof loadStudents === 'function') loadStudents();
+            }
+        } catch (e) { showToast(e.message, 'error'); }
     }
 
     // ========================================
@@ -5844,8 +5874,8 @@ const Admin = (function() {
         archiveStudent(id) {
             archiveStudent(id);
         },
-        deleteStudentSafe(id) {
-            deleteStudentSafe(id);
+        deleteStudentPermanently(id) {
+            deleteStudentPermanently(id);
         },
         createInstructorModal() {
             createInstructorModal();

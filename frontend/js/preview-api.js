@@ -1126,13 +1126,52 @@
             if (body.status) { var u2 = userById(su2.user_id); if (u2) u2.is_active = body.status === 'active'; }
             save(DB); return json(studentOut(su2));
         }
+        if (seg[1] === 'students' && seg[2] && seg[3] === 'delete-impact' && method === 'GET') {
+            var sim = DB.students.filter(function (x) { return x.id === seg[2]; })[0];
+            if (!sim) return err(404, 'Not found');
+            var eImp = DB.enrollments.filter(function (e) { return e.student_id === sim.id; });
+            var sImp = DB.sessions.filter(function (s) { return s.student_id === sim.id; });
+            var invImp = (DB.invoices || []).filter(function (v) { return v.student_id === sim.id; });
+            var warn = [];
+            if (eImp.length || sImp.length) warn.push('This student has academic history — archiving is RECOMMENDED because it preserves everything without deletion.');
+            if (invImp.length) warn.push('Financial records exist: they will be RETAINED for accounting with their student/enrollment link released.');
+            warn.push('Permanent deletion is irreversible: the login username and CMA registration ID become available for reuse.');
+            return json({
+                student: { id: sim.id, full_name: (sim.first_name || '') + ' ' + (sim.last_name || ''), cma_registration_id: sim.cma_registration_id, status: sim.status },
+                remove: { enrollments: eImp.length, class_sessions: sImp.length },
+                retain_unlinked: { invoices: invImp.length },
+                archive_recommended: !!(eImp.length || sImp.length),
+                warnings: warn
+            });
+        }
         if (seg[1] === 'students' && seg[2] && method === 'DELETE') {
             var su3 = DB.students.filter(function (x) { return x.id === seg[2]; })[0];
             if (!su3) return err(404, 'Not found');
-            var hasHistory = DB.enrollments.some(function (e) { return e.student_id === su3.id; }) || DB.sessions.some(function (s) { return s.student_id === su3.id; });
-            if (hasHistory) return err(409, 'This student has enrolment or class history — archive instead of deleting');
+            // permanent delete: remove student-owned rows, RETAIN financials (unlinked)
+            var eIds = DB.enrollments.filter(function (e) { return e.student_id === su3.id; }).map(function (e) { return e.id; });
+            var removed = {
+                enrollments: eIds.length,
+                class_sessions: DB.sessions.filter(function (s2) { return s2.student_id === su3.id || (s2.enrollment_id && eIds.indexOf(s2.enrollment_id) >= 0); }).length,
+                guardians: (DB.guardians || []).filter(function (g) { return g.student_id === su3.id; }).length
+            };
+            var retainedInv = 0;
+            (DB.invoices || []).forEach(function (iv) {
+                if (iv.student_id === su3.id || (iv.enrollment_id && eIds.indexOf(iv.enrollment_id) >= 0)) {
+                    iv.student_id = null; iv.enrollment_id = null; retainedInv++;
+                }
+            });
+            var u3 = userById(su3.user_id);
+            var releasedName = u3 ? u3.username : null;
+            var releasedReg = su3.cma_registration_id;
+            DB.enrollments = DB.enrollments.filter(function (e) { return e.student_id !== su3.id; });
+            DB.sessions = DB.sessions.filter(function (s2) { return s2.student_id !== su3.id && !(s2.enrollment_id && eIds.indexOf(s2.enrollment_id) >= 0); });
+            DB.guardians = (DB.guardians || []).filter(function (g) { return g.student_id !== su3.id; });
             DB.students = DB.students.filter(function (x) { return x.id !== su3.id; });
-            save(DB); return json({ deleted: true, id: seg[2] });
+            if (su3.user_id) DB.users = DB.users.filter(function (u) { return u.id !== su3.user_id; });
+            save(DB);
+            return json({ deleted: true, id: seg[2],
+                released: { username: releasedName, cma_registration_id: releasedReg },
+                removed: removed, retained_unlinked: { invoices: retainedInv } });
         }
         if (seg[1] === 'students' && seg[2]) {
             var su4 = DB.students.filter(function (x) { return x.id === seg[2]; })[0];

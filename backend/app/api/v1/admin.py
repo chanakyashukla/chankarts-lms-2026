@@ -1,13 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, update
+from sqlalchemy import select, func, and_, update, or_
+from sqlalchemy.exc import IntegrityError, DBAPIError
 from typing import List, Optional
 from uuid import UUID
 from datetime import datetime, date
 import re
 
-from app.database import get_db
+from app.database import get_db, Base
 from app.models.user import User
 from app.models.student import Student
 from app.models.guardian import Guardian, GuardianAccount
@@ -1257,53 +1258,275 @@ async def admin_update_student(
             "cma_registration_id": s.cma_registration_id, "phone": s.phone}
 
 
+# ========================================
+# Student permanent deletion (schema-aware, transactional)
+# ========================================
+# Explicit cleanup map: table -> {column: scope-key}.  Columns that are not
+# present on a table are ignored, so the map is safe across schema eras.
+# Children are listed before parents (topological: files→submissions→assignments,
+# history→sessions, schedules→enrollments, … → students → users).
+_STUDENT_REMOVE_MAP: list[tuple[str, dict[str, str]]] = [
+    ("assignment_files", {"assignment_id": "assignments", "owner_user_id": "users"}),
+    ("submissions", {"student_id": "student", "assignment_id": "assignments", "enrollment_id": "enrollments"}),
+    ("assignments", {"student_id": "student", "enrollment_id": "enrollments"}),
+    ("session_status_history", {"session_id": "sessions"}),
+    ("class_sessions", {"student_id": "student", "enrollment_id": "enrollments"}),
+    ("attendance", {"student_id": "student", "enrollment_id": "enrollments"}),
+    ("class_schedules", {"enrollment_id": "enrollments"}),
+    ("progress", {"student_id": "student", "enrollment_id": "enrollments"}),
+    ("milestones", {"student_id": "student", "enrollment_id": "enrollments"}),
+    ("monthly_reports", {"student_id": "student", "enrollment_id": "enrollments"}),
+    ("student_syllabus_progress", {"student_id": "student", "enrollment_id": "enrollments"}),
+    ("student_syllabus_assignments", {"student_id": "student", "enrollment_id": "enrollments"}),
+    ("student_instruments", {"student_id": "student"}),
+    ("student_remarks", {"student_id": "student", "enrollment_id": "enrollments"}),
+    ("achievements", {"student_id": "student"}),
+    ("material_assignments", {"student_id": "student", "enrollment_id": "enrollments"}),
+    ("resource_visibility_targets", {"student_id": "student"}),
+    ("exam_items", {"exam_id": "exams"}),
+    ("exams", {"student_id": "student", "enrollment_id": "enrollments"}),
+    ("guardians", {"student_id": "student"}),
+    ("guardian_accounts", {"student_id": "student"}),
+    ("notifications", {"user_id": "users"}),
+    ("pin_reset_requests", {"user_id": "users"}),
+    ("email_verification_tokens", {"user_id": "users"}),
+    ("support_replies", {"author_user_id": "users"}),
+    ("enrollments", {"student_id": "student"}),
+]
+
+# Financial + audit/application rows are RETAINED: their student/enrollment
+# links are released (SET NULL) inside the same transaction before the
+# student/enrollment rows disappear.  This is the documented retention
+# strategy — invoice/payment/fee integrity is preserved, unique identifiers
+# (username, CMA registration id) are freed for reuse.
+_STUDENT_RETAIN_UNLINK: list[tuple[str, dict[str, str]]] = [
+    ("invoices", {"student_id": "student", "enrollment_id": "enrollments"}),
+    ("fee_records", {"student_id": "student", "enrollment_id": "enrollments"}),
+    ("payment_allocations", {"student_id": "student", "enrollment_id": "enrollments"}),
+    ("credit_ledger", {"student_id": "student", "enrollment_id": "enrollments"}),
+    ("exam_fees", {"student_id": "student", "enrollment_id": "enrollments"}),
+    # application / support history keeps existing but drops the link:
+    ("registration_requests", {"student_id": "student"}),
+    ("support_requests", {"related_student_id": "student", "related_enrollment_id": "enrollments", "related_session_id": "sessions"}),
+    # defensive NO ACTION FKs (prod-era constraints) — never a deletion blocker:
+    ("audit_events", {"actor_user_id": "users"}),
+    ("payments", {"payer_user_id": "users"}),
+]
+
+
+async def _collect_student_scopes(db: AsyncSession, student) -> dict:
+    uid = student.id
+    enr = [r[0] for r in (await db.execute(select(Enrollment.id).where(Enrollment.student_id == uid))).all()]
+    sess = [r[0] for r in (await db.execute(select(ClassSession.id).where(ClassSession.student_id == uid))).all()]
+    asg_q = select(Assignment.id).where(
+        or_(Assignment.student_id == uid, Assignment.enrollment_id.in_(enr)) if enr
+        else Assignment.student_id == uid
+    )
+    asg = [r[0] for r in (await db.execute(asg_q)).all()]
+    from app.models.exam import Exam
+    exam_q = select(Exam.id).where(
+        or_(Exam.student_id == uid, Exam.enrollment_id.in_(enr)) if enr
+        else Exam.student_id == uid
+    )
+    exams = [r[0] for r in (await db.execute(exam_q)).all()]
+    # guardian (parent) accounts belonging to this student
+    ga_t = Base.metadata.tables.get("guardian_accounts")
+    parent_users: list[UUID] = []
+    if ga_t is not None:
+        rows = (await db.execute(
+            select(ga_t.c.user_id).where(ga_t.c.student_id == uid)
+        )).all()
+        parent_users = [r[0] for r in rows]
+    # a parent user is deleted with the student only when no other student
+    # still depends on that account (siblings keep their guardian login)
+    deleting_parents: list[UUID] = []
+    for p in parent_users:
+        others = (await db.execute(
+            select(func.count()).select_from(ga_t)
+            .where(ga_t.c.user_id == p, ga_t.c.student_id != uid)
+        )).scalar() if ga_t is not None else 0
+        if not others:
+            deleting_parents.append(p)
+    return {
+        "student": uid,
+        "enrollments": enr,
+        "sessions": sess,
+        "assignments": asg,
+        "exams": exams,
+        "users": [student.user_id, *deleting_parents],  # student login + orphaned parent logins
+        "parents_deleting": deleting_parents,
+    }
+
+
+def _scope_clause_for(table, map_entry: dict[str, str], scopes: dict):
+    clauses = []
+    for col_name, key in map_entry.items():
+        if col_name not in table.c:
+            continue
+        val = scopes.get(key)
+        if val is None:
+            continue
+        if isinstance(val, (list, tuple, set)):
+            if not val:
+                continue
+            clauses.append(table.c[col_name].in_(list(val)))
+        else:
+            clauses.append(table.c[col_name] == val)
+    if not clauses:
+        return None
+    return or_(*clauses) if len(clauses) > 1 else clauses[0]
+
+
+async def _student_delete_impact(db: AsyncSession, student, scopes: dict) -> dict:
+    remove: dict[str, int] = {}
+    for tname, mmap in _STUDENT_REMOVE_MAP:
+        t = Base.metadata.tables.get(tname)
+        if t is None:
+            continue
+        clause = _scope_clause_for(t, mmap, scopes)
+        remove[tname] = 0 if clause is None else int(
+            (await db.execute(select(func.count()).select_from(t).where(clause))).scalar() or 0
+        )
+    retain: dict[str, int] = {}
+    for tname, mmap in _STUDENT_RETAIN_UNLINK:
+        t = Base.metadata.tables.get(tname)
+        if t is None:
+            continue
+        clause = _scope_clause_for(t, mmap, scopes)
+        retain[tname] = 0 if clause is None else int(
+            (await db.execute(select(func.count()).select_from(t).where(clause))).scalar() or 0
+        )
+    academic = {k: v for k, v in remove.items() if k not in ("notifications", "pin_reset_requests", "email_verification_tokens", "support_replies", "guardian_accounts", "guardians")}
+    financial = {k: v for k, v in retain.items() if k in ("invoices", "fee_records", "payment_allocations", "credit_ledger", "exam_fees")}
+    archive_recommended = any(academic.values())
+    warnings = []
+    if archive_recommended:
+        warnings.append("This student has academic history — archiving is RECOMMENDED because it preserves everything without deletion.")
+    if any(financial.values()):
+        warnings.append("Financial records exist: they will be RETAINED for accounting with their student/enrollment link released (cannot be viewed under this student anymore).")
+    if remove.get("guardian_accounts"):
+        warnings.append(f"{remove['guardian_accounts']} guardian login(s) used only by this student will also be removed.")
+    warnings.append("Permanent deletion is irreversible: the login username and CMA registration ID become available for reuse.")
+    return {
+        "student": {"id": str(student.id), "full_name": student.full_name,
+                    "cma_registration_id": student.cma_registration_id, "status": student.status},
+        "remove": remove,
+        "retain_unlinked": retain,
+        "archive_recommended": archive_recommended,
+        "warnings": warnings,
+    }
+
+
+@router.get("/students/{student_id}/delete-impact")
+async def admin_student_delete_impact(
+    student_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Report exactly what a permanent delete would remove vs retain."""
+    student = (await db.execute(select(Student).where(Student.id == student_id))).scalar_one_or_none()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    scopes = await _collect_student_scopes(db, student)
+    return await _student_delete_impact(db, student, scopes)
+
+
 @router.delete("/students/{student_id}")
 async def admin_delete_student(
     student_id: UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
 ):
-    """Remove a student only when NO history exists; otherwise require archival."""
+    """Permanently delete a student in one transaction.
+
+    Archiving is never substituted silently: linked academic records are
+    removed explicitly (children before parents), financial/audit records are
+    retained with their student/enrollment link released, and the username +
+    CMA registration ID are freed for reuse.  Any unresolved database
+    dependency rolls the whole transaction back and is reported by name.
+    """
     student = (await db.execute(select(Student).where(Student.id == student_id))).scalar_one_or_none()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
 
-    history = {}
-    history["enrollments"] = (await db.execute(
-        select(func.count(Enrollment.id)).where(Enrollment.student_id == student.id))).scalar_one()
-    history["sessions"] = (await db.execute(
-        select(func.count(ClassSession.id)).where(ClassSession.student_id == student.id))).scalar_one()
-    history["assignments"] = (await db.execute(
-        select(func.count(Assignment.id)).where(Assignment.student_id == student.id))).scalar_one()
-    if any(history.values()):
+    released_username = None
+    user_row = (await db.execute(select(User).where(User.id == student.user_id))).scalar_one_or_none()
+    if user_row:
+        released_username = user_row.username
+    released_reg = student.cma_registration_id
+    full_name = student.full_name
+
+    scopes = await _collect_student_scopes(db, student)
+    impact = await _student_delete_impact(db, student, scopes)
+
+    try:
+        # 1) retention: release links on financial/audit/application rows
+        for tname, mmap in _STUDENT_RETAIN_UNLINK:
+            t = Base.metadata.tables.get(tname)
+            if t is None:
+                continue
+            clause = _scope_clause_for(t, mmap, scopes)
+            if clause is None:
+                continue
+            for col_name in mmap:
+                if col_name in t.c:
+                    await db.execute(t.update().where(clause).values(**{col_name: None}))
+
+        # 2) student-owned records: children before parents (explicit order)
+        removed: dict[str, int] = {}
+        for tname, mmap in _STUDENT_REMOVE_MAP:
+            t = Base.metadata.tables.get(tname)
+            if t is None:
+                continue
+            clause = _scope_clause_for(t, mmap, scopes)
+            if clause is None:
+                continue
+            res = await db.execute(t.delete().where(clause))
+            removed[tname] = int(res.rowcount or 0)
+
+        # 3) students row then user accounts (student + orphaned parents)
+        await db.execute(
+            Student.__table__.delete().where(Student.__table__.c.id == student.id)
+        )
+        users_to_delete = list(scopes["users"])
+        if users_to_delete:
+            await db.execute(
+                User.__table__.delete().where(User.__table__.c.id.in_(users_to_delete))
+            )
+        await db.flush()
+
+        retained = impact["retain_unlinked"]
+        await record_audit(
+            db,
+            action="student.deleted",
+            entity_type="student",
+            entity_id=str(student_id),
+            actor_user_id=current_user.id,
+            actor_role=current_user.role.value,
+            summary=(
+                f"Permanently deleted student {full_name} "
+                f"({released_reg}, login {released_username}); "
+                f"removed academic rows, retained financial rows "
+                f"(invoices={retained.get('invoices', 0)}, fee_records={retained.get('fee_records', 0)}); "
+                f"identifiers released"
+            ),
+        )
+    except (IntegrityError, DBAPIError) as e:
+        await db.rollback()
+        orig = getattr(getattr(e, "orig", None), "sqlstate", None) or str(e.orig or e)
+        detail = str(orig)[:300]
         raise HTTPException(
             status_code=409,
-            detail="This student has enrolment, class or academic history — archive instead of deleting (PATCH status=archived)",
+            detail=f"Deletion rolled back — unresolvable database dependency: {detail}",
         )
 
-    await db.execute(select(Guardian).where(Guardian.student_id == student.id))
-    guardians = (await db.execute(select(Guardian).where(Guardian.student_id == student.id))).scalars().all()
-    for g in guardians:
-        await db.delete(g)
-    gas = (await db.execute(select(GuardianAccount).where(GuardianAccount.student_id == student.id))).scalars().all()
-    for ga in gas:
-        await db.delete(ga)
-    user_id = student.user_id
-    await db.delete(student)
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if user:
-        await db.delete(user)
-    await db.flush()
-    await record_audit(
-        db,
-        action="student.deleted",
-        entity_type="student",
-        entity_id=str(student_id),
-        actor_user_id=current_user.id,
-        actor_role=current_user.role.value,
-        summary=f"Deleted student {student.full_name} (no historical records)",
-    )
-    return {"deleted": True, "id": str(student_id)}
+    return {
+        "deleted": True,
+        "id": str(student_id),
+        "released": {"username": released_username, "cma_registration_id": released_reg},
+        "removed": impact["remove"],
+        "retained_unlinked": impact["retain_unlinked"],
+    }
 
 
 # ========================================

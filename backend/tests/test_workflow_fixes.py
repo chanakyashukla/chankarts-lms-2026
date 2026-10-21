@@ -486,9 +486,17 @@ async def test_account_management_students_and_instructors(client, admin_user):
     arch = await client.patch(f"/api/v1/admin/students/{sid}", json={"status": "archived"}, headers=h)
     assert arch.status_code == 200 and arch.json()["status"] == "archived"
 
-    # delete is refused when history exists (enrolment was created) → archive guidance
+    # delete with history now performs a PERMANENT delete (archive stays optional):
+    imp = await client.get(f"/api/v1/admin/students/{sid}/delete-impact", headers=h)
+    assert imp.status_code == 200 and imp.json()["remove"]["enrollments"] >= 1
     deny = await client.delete(f"/api/v1/admin/students/{sid}", headers=h)
-    assert deny.status_code == 409 and "archive" in deny.json()["detail"].lower()
+    assert deny.status_code == 200 and deny.json()["deleted"] is True
+    assert deny.json()["removed"]["enrollments"] >= 1
+    assert deny.json()["released"]["username"] == "CMA-8001"
+    # released username is immediately reusable
+    reuse = await client.post("/api/v1/admin/students",
+                              json={"username": "CMA-8001", "first_name": "ReUsed"}, headers=h)
+    assert reuse.status_code == 201
 
     # a clean student with no history CAN be deleted
     clean = await client.post("/api/v1/admin/students", json={"username": "CMA-8002", "first_name": "Clean"}, headers=h)

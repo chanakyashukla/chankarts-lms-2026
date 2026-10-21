@@ -22,7 +22,8 @@ class CreditLedgerEntry(Base):
     __tablename__ = "credit_ledger"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False, index=True)
+    # nullable + SET NULL: retained after permanent student deletion (unlinked)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="SET NULL"), nullable=True, index=True)
     enrollment_id = Column(UUID(as_uuid=True), ForeignKey("enrollments.id", ondelete="SET NULL"), nullable=True)
 
     kind = Column(String(20), nullable=False)  # advance | applied | refunded | adjustment
@@ -48,7 +49,8 @@ class ExamFee(Base):
     __tablename__ = "exam_fees"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False, index=True)
+    # nullable + SET NULL: retained after permanent student deletion (unlinked)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="SET NULL"), nullable=True, index=True)
     enrollment_id = Column(UUID(as_uuid=True), ForeignKey("enrollments.id", ondelete="SET NULL"), nullable=True)
     exam_id = Column(UUID(as_uuid=True), nullable=True)
     invoice_id = Column(UUID(as_uuid=True), ForeignKey("invoices.id", ondelete="SET NULL"), nullable=True)

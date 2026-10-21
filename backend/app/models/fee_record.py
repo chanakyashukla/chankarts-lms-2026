@@ -19,9 +19,10 @@ class FeeRecord(Base):
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     
-    # Links
-    enrollment_id = Column(UUID(as_uuid=True), ForeignKey("enrollments.id", ondelete="CASCADE"), nullable=False)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    # Links (nullable + SET NULL: permanent student deletion retains the fee
+    # record for accounting while releasing the student/enrollment identifiers)
+    enrollment_id = Column(UUID(as_uuid=True), ForeignKey("enrollments.id", ondelete="SET NULL"), nullable=True)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="SET NULL"), nullable=True)
     
     # Fee details
     fee_plan = Column(String(20), nullable=False)  # 4_classes, 8_classes
