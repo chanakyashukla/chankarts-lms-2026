@@ -24,6 +24,27 @@ async def client():
         yield c
 
 
+@pytest_asyncio.fixture
+async def branded_client():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="https://academy.chankarts.com") as c:
+        yield c
+
+
+@pytest.mark.asyncio
+async def test_branded_domain_root_opens_academy(branded_client):
+    r = await branded_client.get("/", follow_redirects=False)
+    assert r.status_code in (302, 307, 308)
+    assert r.headers["location"] == "/academy/"
+
+
+@pytest.mark.asyncio
+async def test_default_domain_root_json_unchanged(client):
+    r = await client.get("/")
+    assert r.status_code == 200
+    assert r.json()["status"] == "active"
+
+
 @pytest.mark.asyncio
 async def test_health_endpoint(client):
     r = await client.get("/health")

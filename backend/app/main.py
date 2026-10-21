@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from contextlib import asynccontextmanager
 from app.config import get_settings
 from app.api.v1.router import api_router
@@ -138,7 +138,11 @@ app.include_router(api_router, prefix="/api/v1")
 
 
 @app.get("/")
-async def root():
+async def root(request: Request):
+    # Branded custom domain: the bare origin opens the Academy directly.
+    # The default onrender.com origin keeps serving the JSON root unchanged.
+    if (request.headers.get("host") or "").lower().split(":")[0] == "academy.chankarts.com":
+        return RedirectResponse(url="/academy/", status_code=308)
     return {
         "name": settings.APP_NAME,
         "version": settings.APP_VERSION,
