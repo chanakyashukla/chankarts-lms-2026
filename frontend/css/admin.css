@@ -1343,3 +1343,66 @@
     padding: 4px 10px;
     font-size: 0.78rem;
 }
+
+/* ============================================
+   Students table — horizontal scroll (mobile-friendly)
+   ============================================ */
+.table-scroll-outer {
+    position: relative;
+}
+
+.table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+}
+
+/* Wide enough to keep every action reachable; large screens never scroll. */
+.table-scroll .admin-table {
+    min-width: 1080px;
+}
+
+/* Sticky identity column: CMA ID stays visible while swiping actions. */
+.table-scroll .admin-table th:first-child,
+.table-scroll .admin-table td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--color-bg-card);
+}
+
+.table-scroll .admin-table th:first-child {
+    z-index: 2;
+}
+
+.table-scroll .admin-table tr:hover td:first-child {
+    background: #171a20;
+}
+
+.table-scroll-hint {
+    font-size: 0.72rem;
+    color: var(--color-text-muted);
+    padding: 6px 14px 8px;
+    white-space: nowrap;
+}
+
+/* Edge affordance only when the table can actually scroll */
+@media (max-width: 1180px) {
+    .table-scroll-outer::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        right: 0;
+        bottom: 26px;
+        width: 30px;
+        pointer-events: none;
+        background: linear-gradient(to right, rgba(0, 0, 0, 0), var(--color-bg-card));
+        opacity: 0.9;
+    }
+}
+
+/* Touch: taps on buttons inside the scroller must not double-fire as scroll drags */
+.table-scroll button {
+    touch-action: manipulation;
+}

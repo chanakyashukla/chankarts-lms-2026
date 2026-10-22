@@ -24,7 +24,7 @@ from app.models.enrollment import Enrollment
 from app.models.student import Student
 from app.models.support import SupportAttachment, SupportReply, SupportRequest
 from app.models.user import User
-from app.services.access import get_instructor_for_user, require_student_access
+from app.services.access import get_linked_student_ids, get_instructor_for_user, require_student_access
 from app.services.files import BASE_HOMEWORK_TYPES, safe_filename, save_upload
 from app.services.notifications import notify_user
 
@@ -74,12 +74,24 @@ def _serialize_reply(r: SupportReply) -> dict:
     }
 
 
+async def _participant_student_ids(db: AsyncSession, user: User) -> set:
+    """Students whose linked threads this portal user may see/reply to
+    (their own conversations plus academy threads raised about them —
+    e.g. payment-claim rejections from the administration)."""
+    try:
+        return set(await get_linked_student_ids(db, user))
+    except Exception:
+        return set()
+
+
 async def _load_own_request(db: AsyncSession, user: User, request_id: UUID) -> SupportRequest:
     req = (await db.execute(select(SupportRequest).where(SupportRequest.id == request_id))).scalar_one_or_none()
     if not req:
         raise HTTPException(status_code=404, detail="Conversation not found")
     if req.sender_user_id != user.id and user.role != UserRole.ADMIN:
-        raise HTTPException(status_code=403, detail="You can only view your own conversations")
+        mine = await _participant_student_ids(db, user)
+        if req.related_student_id not in mine or req.related_student_id is None:
+            raise HTTPException(status_code=403, detail="You can only view your own conversations")
     return req
 
 
@@ -123,9 +135,14 @@ async def list_my_support_requests(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    from sqlalchemy import or_
+    mine = await _participant_student_ids(db, current_user)
     rows = (await db.execute(
         select(SupportRequest)
-        .where(SupportRequest.sender_user_id == current_user.id)
+        .where(or_(
+            SupportRequest.sender_user_id == current_user.id,
+            SupportRequest.related_student_id.in_(list(mine)) if mine else False,
+        ))
         .order_by(SupportRequest.updated_at.desc())
     )).scalars().all()
     out = []
@@ -171,8 +188,10 @@ async def reply_to_own_request(
     """Follow up on your own conversation. Once resolved by the academy,
     contact administration again with a new request instead."""
     req = await _load_own_request(db, current_user, request_id)
-    if req.sender_user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Only the sender can add to this conversation")
+    if req.sender_user_id != current_user.id and current_user.role != UserRole.ADMIN:
+        mine = await _participant_student_ids(db, current_user)
+        if req.related_student_id not in mine:
+            raise HTTPException(status_code=403, detail="Only conversation participants can reply")
     if req.status == "resolved":
         raise HTTPException(status_code=400, detail="This conversation is resolved — please submit a new request")
     reply = SupportReply(
@@ -198,7 +217,9 @@ async def upload_support_attachment(
     """Optional attachment — server-side file type and size validation."""
     req = await _load_own_request(db, current_user, request_id)
     if req.sender_user_id != current_user.id and current_user.role != UserRole.ADMIN:
-        raise HTTPException(status_code=403, detail="Only the sender can attach files")
+        mine = await _participant_student_ids(db, current_user)
+        if req.related_student_id not in mine:
+            raise HTTPException(status_code=403, detail="Only conversation participants can attach files")
     stored_name, content_type, size, _ = await save_upload(
         file, subdir="support", allowed_types=BASE_HOMEWORK_TYPES
     )

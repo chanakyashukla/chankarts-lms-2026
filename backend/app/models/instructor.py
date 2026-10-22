@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, ForeignKey, Boolean
+from sqlalchemy import Column, String, DateTime, ForeignKey, Boolean, Integer
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -26,6 +26,11 @@ class Instructor(Base):
     profile_image_url = Column(String(500))
     bio = Column(String(2000))
     is_active = Column(Boolean, default=True)
+
+    # Scheduling: admin-configured travel buffer (minutes) applied between
+    # consecutive OFFLINE classes. NULL = travel cannot be confirmed
+    # (availability then reports "requires clarification" instead of guessing).
+    travel_buffer_minutes = Column(Integer, nullable=True)
     
     # Relationships
     user = relationship("User", back_populates="instructor_profile")

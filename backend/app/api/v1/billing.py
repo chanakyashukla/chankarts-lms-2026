@@ -10,7 +10,7 @@ from datetime import date, datetime
 from typing import List, Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -35,6 +35,8 @@ from app.models.finance import CreditLedgerEntry, ExamFee, Receipt
 from app.models.session import ClassSession
 from app.models.student import Student
 from app.models.user import User
+from app.models.support import SupportRequest, SupportAttachment
+from app.services.files import save_upload, safe_filename, PAYMENT_EVIDENCE_TYPES
 from app.services.access import get_linked_student_ids, require_student_access
 from app.services.audit import record_audit
 from app.services.ids import generate_invoice_number
@@ -670,7 +672,54 @@ async def list_payments(
 
     query = query.order_by(Payment.created_at.desc()).offset(offset).limit(limit)
     result = await db.execute(query)
-    return [_serialize_payment(p) for p in result.scalars().all()]
+    payments = result.scalars().all()
+    if current_user.role != UserRole.ADMIN or not payments:
+        return [_serialize_payment(p) for p in payments]
+
+    # Admin claim context: resolve student + expected amount for the pending
+    # table without guessing — invoice link first, then the payer account.
+    inv_ids = {p.invoice_id for p in payments if p.invoice_id}
+    invs = {}
+    if inv_ids:
+        invs = {i.id: i for i in (await db.execute(
+            select(Invoice).where(Invoice.id.in_(list(inv_ids))))).scalars().all()}
+    payer_ids = {p.payer_user_id for p in payments if p.payer_user_id}
+    payer_students = {}
+    if payer_ids:
+        for st in (await db.execute(
+                select(Student).where(Student.user_id.in_(list(payer_ids))))).scalars().all():
+            payer_students[st.user_id] = st
+    stu_ids = {inv.student_id for inv in invs.values() if inv.student_id} |               {st.id for st in payer_students.values()}
+    stu_map = {}
+    if stu_ids:
+        stu_map = {st.id: st for st in (await db.execute(
+            select(Student).where(Student.id.in_(list(stu_ids))))).scalars().all()}
+
+    out = []
+    for payment in payments:
+        inv = invs.get(payment.invoice_id) if payment.invoice_id else None
+        student = stu_map.get(inv.student_id) if inv and inv.student_id else None
+        if student is None and payment.payer_user_id:
+            student = payer_students.get(payment.payer_user_id)
+        expected = inv.amount_paise if inv else None
+        fee_label = None
+        if inv:
+            fee_label = " · ".join(x for x in [
+                inv.description or (inv.charge_type or "tuition").replace("_", " ").title(),
+                inv.billing_month] if x)
+        out.append({
+            **_serialize_payment(payment),
+            "student_id": str(student.id) if student else None,
+            "student_name": student.full_name if student else None,
+            "cma_registration_id": student.cma_registration_id if student else None,
+            "expected_paise": expected,
+            "outstanding_paise": (max(inv.amount_paise - (inv.amount_paid_paise or 0), 0) if inv else None),
+            "invoice_number": inv.invoice_number if inv else None,
+            "billing_month": inv.billing_month if inv else None,
+            "fee_label": fee_label,
+            "claim_unlinked": student is None,
+        })
+    return out
 
 
 @router.post("/payments/orders", status_code=status.HTTP_201_CREATED)
@@ -2440,3 +2489,163 @@ async def confirm_payment(
     out = _serialize_payment(payment)
     out["allocations"] = applied
     return out
+
+
+# ==================================================================
+# Payment-claim rejection / clarification (admin, manual verification)
+# ==================================================================
+_CLAIM_REASONS_FALLBACK = "Payment claim rejected"
+
+
+async def _resolve_claim_subject(db: AsyncSession, payment):
+    """Deterministic student for a claim: invoice link first, then the payer.
+    Returns (student, invoice) — student may be None (flagged, never guessed)."""
+    inv = None
+    if payment.invoice_id:
+        inv = (await db.execute(select(Invoice).where(Invoice.id == payment.invoice_id))).scalar_one_or_none()
+    student = None
+    if inv and inv.student_id:
+        student = (await db.execute(select(Student).where(Student.id == inv.student_id))).scalar_one_or_none()
+    if student is None and payment.payer_user_id:
+        student = (await db.execute(select(Student).where(Student.user_id == payment.payer_user_id))).scalar_one_or_none()
+    return student, inv
+
+
+async def _claim_support_thread(db: AsyncSession, current_user: User, student,
+                                subject: str, message: str, file: Optional[UploadFile]):
+    """Link the academy's response to the student through the existing support
+    conversation system (visible + replyable from the student portal)."""
+    if student is None:
+        return None
+    req = SupportRequest(
+        sender_user_id=current_user.id,
+        sender_role="admin",
+        subject=subject[:200],
+        message=(message or subject)[:4000],
+        related_student_id=student.id,
+        status="open",
+    )
+    db.add(req)
+    await db.flush()
+    if file is not None and getattr(file, "filename", ""):
+        stored, ctype, size, _ = await save_upload(
+            file, subdir="support", allowed_types=PAYMENT_EVIDENCE_TYPES)
+        db.add(SupportAttachment(
+            request_id=req.id,
+            uploaded_by=current_user.id,
+            filename=safe_filename(file.filename),
+            stored_name=stored,
+            content_type=ctype,
+            size_bytes=size,
+        ))
+        await db.flush()
+    return req
+
+
+@router.post("/payments/{payment_id}/reject")
+async def reject_payment_claim(
+    payment_id: UUID,
+    reason: str = Form(...),
+    message: str = Form(""),
+    file: Optional[UploadFile] = File(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Reject an unverified payment claim with a reason, a personalised
+    message and optional evidence attachment.
+
+    Rejection never touches invoices, allocations, receipts or collected
+    totals — a claim and a verified payment stay distinct.  Idempotent:
+    repeating a rejection is refused with a clear conflict.
+    """
+    payment = (await db.execute(select(Payment).where(Payment.id == payment_id))).scalar_one_or_none()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if payment.status == "rejected":
+        raise HTTPException(status_code=409, detail="This claim has already been rejected")
+    if payment.status == "verified":
+        raise HTTPException(status_code=409,
+                            detail="This payment is already verified — rejecting would erase a confirmed payment; "
+                                   "record a correction instead")
+    if payment.status not in ("pending_verification", "pending", "reported"):
+        raise HTTPException(status_code=400,
+                            detail=f"Only pending claims can be rejected (current status: {payment.status})")
+
+    reason = (reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="A rejection reason is required")
+    message = (message or "").strip()
+
+    payment.status = "rejected"
+    payment.notes = ((payment.notes or "") + f" | Rejected [{reason}]: {message or reason}").strip(" |")
+    db.add(payment)
+    await db.flush()
+
+    student, _inv = await _resolve_claim_subject(db, payment)
+    thread = await _claim_support_thread(
+        db, current_user, student,
+        subject=f"Payment claim rejected — {reason}",
+        message=message or f"Your payment claim ({payment.amount_paise / 100:.2f} {payment.currency}) was "
+                           f"not accepted: {reason}. Please contact the Academy if you need help.",
+        file=file,
+    )
+    await record_audit(
+        db,
+        action="payment.claim_rejected",
+        entity_type="payment",
+        entity_id=str(payment.id),
+        actor_user_id=current_user.id,
+        actor_role=current_user.role.value,
+        summary=f"Rejected payment claim {payment.provider_payment_id or payment.id}: [{reason}]"
+                + (f" — {message[:80]}" if message else ""),
+        after_data={"status": "rejected", "reason": reason},
+    )
+    await db.flush()
+    return {"rejected": True, "status": "rejected",
+            "support_request_id": str(thread.id) if thread else None,
+            "claim_unlinked": student is None}
+
+
+@router.post("/payments/{payment_id}/clarify")
+async def clarify_payment_claim(
+    payment_id: UUID,
+    message: str = Form(...),
+    file: Optional[UploadFile] = File(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Request clarification on a pending claim WITHOUT changing its status —
+    the student sees the question (and any attachment) in their portal."""
+    payment = (await db.execute(select(Payment).where(Payment.id == payment_id))).scalar_one_or_none()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if payment.status not in ("pending_verification", "pending", "reported"):
+        raise HTTPException(status_code=400,
+                            detail=f"Clarification applies only to pending claims (current status: {payment.status})")
+    message = (message or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="A clarification message is required")
+
+    payment.notes = ((payment.notes or "") + f" | Clarification requested: {message}").strip(" |")
+    db.add(payment)
+    await db.flush()
+
+    student, _inv = await _resolve_claim_subject(db, payment)
+    thread = await _claim_support_thread(
+        db, current_user, student,
+        subject="Clarification requested — payment claim",
+        message=message,
+        file=file,
+    )
+    await record_audit(
+        db,
+        action="payment.claim_clarification_requested",
+        entity_type="payment",
+        entity_id=str(payment.id),
+        actor_user_id=current_user.id,
+        actor_role=current_user.role.value,
+        summary=f"Clarification requested on claim {payment.provider_payment_id or payment.id}: {message[:100]}",
+    )
+    await db.flush()
+    return {"status": payment.status, "support_request_id": str(thread.id) if thread else None,
+            "claim_unlinked": student is None}

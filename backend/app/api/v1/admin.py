@@ -5,7 +5,7 @@ from sqlalchemy import select, func, and_, update, or_
 from sqlalchemy.exc import IntegrityError, DBAPIError
 from typing import List, Optional
 from uuid import UUID
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import re
 
 from app.database import get_db, Base
@@ -535,9 +535,11 @@ async def list_instructors(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN]))
 ):
-    result = await db.execute(select(Instructor))
-    instructors = result.scalars().all()
-    
+    result = await db.execute(
+        select(Instructor, User).join(User, User.id == Instructor.user_id)
+    )
+    rows = result.all()
+
     return [
         {
             "id": str(i.id),
@@ -545,12 +547,15 @@ async def list_instructors(
             "last_name": i.last_name,
             "full_name": f"{i.first_name} {i.last_name}",
             "phone": i.phone,
+            "email": u.email,
+            "login_id": u.username,
             "specializations": i.specializations,
             "qualifications": i.qualifications,
             "experience_years": i.experience_years,
             "is_active": i.is_active,
+            "travel_buffer_minutes": i.travel_buffer_minutes,
         }
-        for i in instructors
+        for i, u in rows
     ]
 
 
@@ -1050,7 +1055,10 @@ async def reject_pin_reset(
 # Student account management (admin CRUD)
 # ========================================
 class AdminStudentCreate(BaseModel):
-    username: str
+    # Optional: when omitted the backend derives the Login ID from the CMA
+    # roll number (deterministic rule — see _login_id_from_roll). Providing a
+    # username explicitly remains supported for legacy callers/tests.
+    username: Optional[str] = None
     first_name: str
     last_name: str = ""
     cma_registration_id: Optional[str] = None
@@ -1088,20 +1096,56 @@ async def _unique_username_exists(db: AsyncSession, username: str, exclude_user_
     return (await db.execute(q)).scalar_one_or_none() is not None
 
 
+def _login_id_from_roll(cma_id: str) -> str:
+    """Deterministic Login-ID derivation rule (mirrored in the Add Student form).
+
+    CMA-YYYY-NNNN  →  CMA-NNN   (zero-padded to at least 3 digits)
+        CMA-2026-0015 → CMA-015     CMA-2026-0104 → CMA-104
+    Non-standard rolls fall back to CMA-<alphanumeric suffix, uppercased>.
+    """
+    m = re.match(r"^CMA-\d{4}-(\d+)$", (cma_id or "").strip())
+    if m:
+        return f"CMA-{int(m.group(1)):03d}"
+    suffix = re.sub(r"[^A-Za-z0-9]", "", (cma_id or "").strip().split("-")[-1]).upper()
+    return f"CMA-{suffix}" if suffix else ""
+
+
 @router.post("/students", status_code=status.HTTP_201_CREATED)
 async def admin_create_student(
     body: AdminStudentCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
 ):
-    """Create a student account with a secure temporary PIN (shown once)."""
-    username = body.username.strip()
-    if not _USERNAME_RE.match(username):
-        raise HTTPException(status_code=400, detail="Login ID must be 3-100 chars (letters, digits, . _ -)")
+    """Create a student account with a secure temporary PIN (shown once).
+
+    When no username is supplied, the Login ID is generated on the backend
+    from the CMA roll number via _login_id_from_roll (concurrency-safe: the
+    users.username unique index rejects races with a clear 409).
+    """
     if not body.first_name.strip():
         raise HTTPException(status_code=400, detail="First name is required")
-    if await _unique_username_exists(db, username):
-        raise HTTPException(status_code=409, detail="That login ID is already in use")
+
+    # resolve the roll first — the Login ID derives from it
+    cma_id = body.cma_registration_id or await CMAIdService.generate_cma_id(db)
+    if body.cma_registration_id:
+        clash = (await db.execute(select(Student).where(Student.cma_registration_id == cma_id))).scalar_one_or_none()
+        if clash:
+            raise HTTPException(status_code=409, detail="That CMA Roll Number is already in use")
+
+    if body.username is not None and body.username.strip():
+        username = body.username.strip()
+        if not _USERNAME_RE.match(username):
+            raise HTTPException(status_code=400, detail="Login ID must be 3-100 chars (letters, digits, . _ -)")
+        if await _unique_username_exists(db, username):
+            raise HTTPException(status_code=409, detail="That login ID is already in use")
+    else:
+        username = _login_id_from_roll(cma_id)
+        if not username or not _USERNAME_RE.match(username):
+            raise HTTPException(status_code=400,
+                                detail=f"Cannot derive a Login ID from roll {cma_id!r} — provide an explicit login ID")
+        if await _unique_username_exists(db, username):
+            raise HTTPException(status_code=409,
+                                detail=f"Login ID {username} (derived from roll {cma_id}) is already in use")
     if body.email:
         email_row = (await db.execute(select(User).where(User.email == body.email.lower()))).scalar_one_or_none()
         if email_row:
@@ -1115,12 +1159,6 @@ async def admin_create_student(
             dob = date.fromisoformat(body.date_of_birth)
         except ValueError:
             raise HTTPException(status_code=400, detail="date_of_birth must be YYYY-MM-DD")
-
-    cma_id = body.cma_registration_id or await CMAIdService.generate_cma_id(db)
-    if body.cma_registration_id:
-        clash = (await db.execute(select(Student).where(Student.cma_registration_id == cma_id))).scalar_one_or_none()
-        if clash:
-            raise HTTPException(status_code=409, detail="That CMA Roll Number is already in use")
 
     temp_pin = _gen_temp_pin()
     user = User(
@@ -1181,6 +1219,18 @@ async def admin_create_student(
         summary=f"Created student {student.full_name} ({cma_id}, login {username})",
     )
     await db.flush()
+
+    # race safety: unique-index violations surface here as a clear 409
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        text_ = str(e)
+        if "username" in text_:
+            raise HTTPException(status_code=409, detail=f"Login ID {username} is already in use")
+        if "cma_registration_id" in text_:
+            raise HTTPException(status_code=409, detail="That CMA Roll Number is already in use")
+        raise HTTPException(status_code=409, detail="That identifier is already in use")
 
     return {
         "id": str(student.id),
@@ -1846,6 +1896,464 @@ async def admin_save_monthly_schedule(
 
 
 # ========================================
+# Recurring schedule changes: availability + instructor travel buffer
+# ========================================
+_WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+
+class RecurringDayIn(BaseModel):
+    day: str                      # monday..sunday
+    start_time: str               # HH:MM
+    end_time: str                 # HH:MM
+
+
+class RecurringChangeIn(BaseModel):
+    enrollment_id: Optional[UUID] = None
+    new_days: list[RecurringDayIn]
+    effective_date: str           # YYYY-MM-DD
+    reason: Optional[str] = None
+    instructor_id: Optional[UUID] = None
+    confirm: bool = False
+    acknowledge_travel_unknown: bool = False
+
+
+async def _slot_conflict_list(db: AsyncSession, student_id: UUID, instructor_id: Optional[UUID],
+                              d: date, s_t: dtime, e_t: dtime, *,
+                              exclude_session_ids=(), exclude_schedule_ids=(),
+                              own_enrollment_id: Optional[UUID] = None) -> list[dict]:
+    """Existing conflict rules (same as monthly scheduling): overlapping
+    intervals with confirmed sessions + recurring timetables of the instructor
+    and the student.  Own rows being replaced/moved are excluded."""
+    conflicts: list[dict] = []
+    if instructor_id:
+        for isess in (await db.execute(
+                select(ClassSession).where(
+                    ClassSession.instructor_id == instructor_id,
+                    ClassSession.scheduled_date == d,
+                    ClassSession.status != "cancelled"))).scalars().all():
+            if isess.id in exclude_session_ids:
+                continue
+            if _slot_overlaps(s_t, e_t, isess.scheduled_start, isess.scheduled_end):
+                conflicts.append({
+                    "type": "instructor", "date": d.isoformat(),
+                    "message": f"This instructor already has a class scheduled on {d.day} "
+                               f"{_MONTH_NAMES[d.month]}, {_fmt12(s_t)}-{_fmt12(e_t)}.",
+                })
+                break
+        for w in (await db.execute(
+                select(ClassSchedule).where(
+                    ClassSchedule.instructor_id == instructor_id,
+                    ClassSchedule.is_active.is_(True)))).scalars().all():
+            if w.id in exclude_schedule_ids:
+                continue
+            if w.day_of_week == _WEEKDAYS[d.weekday()] and _slot_overlaps(s_t, e_t, w.start_time, w.end_time):
+                conflicts.append({
+                    "type": "instructor_weekly", "date": d.isoformat(),
+                    "message": f"This instructor already has a weekly class on "
+                               f"{_WEEKDAYS[d.weekday()].capitalize()}s, {_fmt12(s_t)}-{_fmt12(e_t)}.",
+                })
+                break
+    if student_id:
+        for ss in (await db.execute(
+                select(ClassSession).where(
+                    ClassSession.student_id == student_id,
+                    ClassSession.scheduled_date == d,
+                    ClassSession.status != "cancelled"))).scalars().all():
+            if ss.id in exclude_session_ids:
+                continue
+            if _slot_overlaps(s_t, e_t, ss.scheduled_start, ss.scheduled_end):
+                conflicts.append({
+                    "type": "student", "date": d.isoformat(),
+                    "message": "This student already has a class scheduled on "
+                               f"{d.day} {_MONTH_NAMES[d.month]}, {_fmt12(s_t)}-{_fmt12(e_t)}.",
+                })
+                break
+        student_enrs = [e.id for e in (await db.execute(
+            select(Enrollment).where(Enrollment.student_id == student_id))).scalars().all()]
+        for w in (await db.execute(
+                select(ClassSchedule).where(
+                    ClassSchedule.enrollment_id.in_(student_enrs),
+                    ClassSchedule.is_active.is_(True)))).scalars().all():
+            if w.id in exclude_schedule_ids or w.enrollment_id == own_enrollment_id:
+                continue  # rows of the schedule being changed are replaced, not conflicts
+            if w.day_of_week == _WEEKDAYS[d.weekday()] and _slot_overlaps(s_t, e_t, w.start_time, w.end_time):
+                conflicts.append({
+                    "type": "student_weekly", "date": d.isoformat(),
+                    "message": "This student already has a weekly class on "
+                               f"{_WEEKDAYS[d.weekday()].capitalize()}s, {_fmt12(s_t)}-{_fmt12(e_t)}.",
+                })
+                break
+    return conflicts
+
+
+async def _travel_status(db: AsyncSession, instructor, d: date, s_t: dtime, e_t: dtime,
+                         *, is_online: bool, location: Optional[str],
+                         exclude_session_ids=()) -> tuple[str, Optional[str]]:
+    """Travel-time check between consecutive appointments for OFFLINE classes.
+
+    ok                    — nothing to travel between / online class
+    travel_insufficient   — configured buffer exceeds the real gap (blocked)
+    needs_clarification   — required location/travel data missing (flagged)
+    """
+    if is_online:
+        return "ok", None   # online classes need no travel time
+    neighbours = (await db.execute(
+        select(ClassSession).where(
+            ClassSession.instructor_id == instructor.id,
+            ClassSession.scheduled_date == d,
+            ClassSession.status != "cancelled"))).scalars().all()
+    prev_end, next_start, prev, nxt = None, None, None, None
+    for n in neighbours:
+        if n.id in exclude_session_ids:
+            continue
+        if n.scheduled_end <= s_t and (prev_end is None or n.scheduled_end > prev_end):
+            prev_end, prev = n.scheduled_end, n
+        if n.scheduled_start >= e_t and (next_start is None or n.scheduled_start < next_start):
+            next_start, nxt = n.scheduled_start, n
+    buffer = instructor.travel_buffer_minutes if instructor else None
+    pairs = []
+    if prev is not None and not prev.is_online:
+        pairs.append((prev, (s_t.hour * 60 + s_t.minute) - (prev_end.hour * 60 + prev_end.minute), "after"))
+    if nxt is not None and not nxt.is_online:
+        pairs.append((nxt, (nxt.scheduled_start.hour * 60 + nxt.scheduled_start.minute)
+                      - (e_t.hour * 60 + e_t.minute), "before"))
+    if not pairs:
+        return "ok", None
+    # definite gaps first
+    for neighbour, gap, _where in pairs:
+        if buffer is not None and location and neighbour.location and gap < buffer:
+            return ("travel_insufficient",
+                    f"Only {gap} minutes between this class ({location}) and "
+                    f"the {'previous' if _where == 'after' else 'next'} class at {neighbour.location} — "
+                    f"the configured travel buffer is {buffer} minutes.")
+    # then missing data that prevents confirmation
+    for neighbour, _gap, where in pairs:
+        if buffer is None:
+            return ("needs_clarification",
+                    f"Travel cannot be confirmed: no travel buffer configured for "
+                    f"{instructor.first_name if instructor else 'this instructor'} "
+                    f"(set one on the instructor profile).")
+        if not location or not neighbour.location:
+            return ("needs_clarification",
+                    f"Travel cannot be confirmed: location missing for this class or the "
+                    f"{'previous' if where == 'after' else 'next'} appointment.")
+    return "ok", None
+
+
+def _first_weekday_on_or_after(eff: date, weekday: int) -> date:
+    return eff + timedelta(days=(weekday - eff.weekday()) % 7)
+
+
+def _shift_within_week(old: date, to_weekday: int, eff: date) -> date:
+    """Same-ISO-week shift (Saturday→Sunday etc.), never before effective_date."""
+    new = old + timedelta(days=(to_weekday - old.weekday()))
+    if new < eff:
+        new += timedelta(days=7)
+    return new
+
+
+async def _compute_recurring_change(db: AsyncSession, student, enrollment, body: RecurringChangeIn,
+                                    current_user=None) -> dict:
+    """Shared preview/apply computation (fresh on save = race revalidation)."""
+    import calendar as _cal
+    eff = date.fromisoformat(body.effective_date)
+    old_rows = (await db.execute(
+        select(ClassSchedule).where(
+            ClassSchedule.enrollment_id == enrollment.id,
+            ClassSchedule.is_active.is_(True))
+        .order_by(ClassSchedule.day_of_week))).scalars().all()
+    if not old_rows:
+        raise HTTPException(status_code=400,
+                            detail="No active recurring schedule for this student — "
+                                   "create one before changing it")
+
+    # instructor: explicit, else the single instructor of the current rows
+    instructors = {r.instructor_id for r in old_rows if r.instructor_id}
+    instructor_id = body.instructor_id or (instructors.pop() if len(instructors) == 1 else None)
+    if body.instructor_id is None and len(instructors) > 0:
+        raise HTTPException(status_code=400,
+                            detail="Current schedule has multiple instructors — choose the instructor explicitly")
+    instructor = (await db.execute(select(Instructor).where(Instructor.id == instructor_id))).scalar_one_or_none()         if instructor_id else None
+    if not instructor:
+        raise HTTPException(status_code=400, detail="Assign an instructor before changing the schedule")
+
+    old_schedule_ids = [r.id for r in old_rows]
+    template = old_rows[0]
+
+    # proposed pattern: first occurrence on/after effective date
+    proposed = []
+    for nd in body.new_days:
+        day = (nd.day or "").strip().lower()
+        if day not in _WEEKDAYS:
+            raise HTTPException(status_code=400, detail=f"Invalid weekday: {nd.day}")
+        try:
+            st, en = dtime.fromisoformat(nd.start_time), dtime.fromisoformat(nd.end_time)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Times must be HH:MM")
+        if st >= en:
+            raise HTTPException(status_code=400, detail="End time must be after start time")
+        occ = _first_weekday_on_or_after(eff, _WEEKDAYS.index(day))
+        conflicts = await _slot_conflict_list(
+            db, student.id, instructor_id, occ, st, en,
+            exclude_schedule_ids=old_schedule_ids, own_enrollment_id=enrollment.id)
+        travel_st, travel_msg = await _travel_status(
+            db, instructor, occ, st, en,
+            is_online=template.is_online, location=template.location)
+        status_ = "conflict" if conflicts else travel_st
+        first_msg = conflicts[0]["message"] if conflicts else travel_msg
+        alternatives = []
+        if status_ == "conflict":
+            dur = (en.hour * 60 + en.minute) - (st.hour * 60 + st.minute)
+            for step in range(9, 20):
+                cst = dtime(step, 0)
+                cen_dt = datetime.combine(occ, cst) + timedelta(minutes=dur)
+                cen = cen_dt.time()
+                if cen.hour > 20:
+                    break
+                alts_c = await _slot_conflict_list(
+                    db, student.id, instructor_id, occ, cst, cen,
+                    exclude_schedule_ids=old_schedule_ids, own_enrollment_id=enrollment.id)
+                alts_t, _ = await _travel_status(
+                    db, instructor, occ, cst, cen,
+                    is_online=template.is_online, location=template.location)
+                if not alts_c and alts_t in ("ok", "needs_clarification"):
+                    alternatives.append({"start": cst.strftime("%H:%M"), "end": cen.strftime("%H:%M"),
+                                         "status": "available" if alts_t == "ok" else "needs_clarification"})
+                    if len(alternatives) >= 3:
+                        break
+            alternatives.sort(key=lambda a: 0 if a["status"] == "available" else 1)
+        proposed.append({
+            "day": day, "start_time": st.strftime("%H:%M"), "end_time": en.strftime("%H:%M"),
+            "first_occurrence": occ.isoformat(),
+            "status": status_, "message": first_msg, "conflicts": conflicts,
+            "travel": travel_st, "alternatives": alternatives,
+        })
+
+    # affected future sessions (eligible for the move)
+    affected = []
+    for sess in (await db.execute(
+            select(ClassSession).where(
+                ClassSession.student_id == student.id,
+                ClassSession.scheduled_date >= eff,
+                ClassSession.status.in_(("scheduled", "rescheduling_required")))
+            .order_by(ClassSession.scheduled_date))).scalars().all():
+        target_day = None
+        for nd in body.new_days:
+            if _WEEKDAYS.index((nd.day or "").lower()) == sess.scheduled_date.weekday():
+                target_day = nd
+                break
+        target_day = target_day or body.new_days[0]
+        to_wd = _WEEKDAYS.index(target_day.day.lower())
+        new_date = _shift_within_week(sess.scheduled_date, to_wd, eff)
+        try:
+            nst, nen = dtime.fromisoformat(target_day.start_time), dtime.fromisoformat(target_day.end_time)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Times must be HH:MM")
+        dup = (await db.execute(
+            select(ClassSession).where(
+                ClassSession.student_id == student.id,
+                ClassSession.scheduled_date == new_date,
+                ClassSession.status != "cancelled"))).scalars().all()
+        dup_hit = any(x.id != sess.id and _slot_overlaps(nst, nen, x.scheduled_start, x.scheduled_end) for x in dup)
+        conflicts = await _slot_conflict_list(
+            db, student.id, instructor_id, new_date, nst, nen,
+            exclude_session_ids={sess.id} | {d.id for d in dup if d.id == sess.id},
+            exclude_schedule_ids=old_schedule_ids, own_enrollment_id=enrollment.id)
+        travel_st, travel_msg = await _travel_status(
+            db, instructor, new_date, nst, nen,
+            is_online=sess.is_online, location=sess.location, exclude_session_ids={sess.id})
+        if dup_hit:
+            st_, msg_, type_ = "duplicate_target", "A class already exists at the target slot.", "duplicate_target"
+        elif conflicts:
+            st_, msg_, type_ = "conflict", conflicts[0]["message"], conflicts[0]["type"]
+        else:
+            st_, msg_, type_ = travel_st, travel_msg, ("travel" if travel_st == "travel_insufficient" else None)
+        affected.append({
+            "type": type_,
+            "session_id": str(sess.id),
+            "old_date": sess.scheduled_date.isoformat(), "old_start": sess.scheduled_start.strftime("%H:%M"),
+            "old_end": sess.scheduled_end.strftime("%H:%M"),
+            "new_date": new_date.isoformat(), "new_start": nst.strftime("%H:%M"),
+            "new_end": nen.strftime("%H:%M"),
+            "status": st_, "message": msg_,
+        })
+
+    hard = [a for a in affected if a["status"] in ("conflict", "travel_insufficient", "duplicate_target")] + \
+           [p for p in proposed if p["status"] in ("conflict", "travel_insufficient")]
+    needs_ack = any(a["status"] == "needs_clarification" for a in affected) or \
+                any(p["status"] == "needs_clarification" for p in proposed)
+    warnings = sorted({a["message"] for a in affected if a["status"] == "needs_clarification" and a["message"]} |
+                      {p["message"] for p in proposed if p["status"] == "needs_clarification" and p["message"]})
+    return {
+        "effective_date": eff.isoformat(),
+        "reason": body.reason,
+        "current_schedule": [
+            {"id": str(r.id), "day": r.day_of_week,
+             "start_time": r.start_time.strftime("%H:%M"), "end_time": r.end_time.strftime("%H:%M")} for r in old_rows],
+        "proposed": proposed,
+        "affected_sessions": affected,
+        "hard_conflicts": hard,
+        "requires_travel_ack": needs_ack,
+        "warnings": warnings,
+        "old_schedule_ids": old_schedule_ids,
+        "instructor_id": str(instructor_id),
+        "template": template,
+        "_instructor": instructor,
+        "_old_rows": old_rows,
+        "_affected_objs": None,
+    }
+
+
+@router.get("/instructors/{instructor_id}/slot-availability")
+async def instructor_slot_availability(
+    instructor_id: UUID,
+    date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    start_time: str = Query(...),
+    end_time: str = Query(...),
+    student_id: Optional[UUID] = None,
+    is_online: bool = False,
+    location: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Automatic slot validation: available / conflict / travel_insufficient /
+    needs_clarification, with up to three alternative times when blocked."""
+    instructor = (await db.execute(select(Instructor).where(Instructor.id == instructor_id))).scalar_one_or_none()
+    if not instructor:
+        raise HTTPException(status_code=404, detail="Instructor not found")
+    try:
+        import datetime as _dt
+        d = _dt.date.fromisoformat(date)
+        st, en = dtime.fromisoformat(start_time), dtime.fromisoformat(end_time)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date or time")
+    if st >= en:
+        raise HTTPException(status_code=400, detail="End time must be after start time")
+    dur = (en.hour * 60 + en.minute) - (st.hour * 60 + st.minute)
+
+    conflicts = await _slot_conflict_list(db, student_id, instructor_id, d, st, en)
+    travel_st, travel_msg = await _travel_status(db, instructor, d, st, en,
+                                                 is_online=is_online, location=location)
+    if conflicts:
+        status_ = "conflict"
+    elif travel_st == "travel_insufficient":
+        status_ = "travel_insufficient"
+    elif travel_st == "needs_clarification":
+        status_ = "needs_clarification"
+    else:
+        status_ = "available"
+    message = conflicts[0]["message"] if conflicts else (travel_msg if status_ != "available" else None)
+
+    alternatives = []
+    if status_ in ("conflict", "travel_insufficient"):
+        for step in range(9, 20):
+            cst = dtime(step, 0)
+            cen = (datetime.combine(d, cst) + timedelta(minutes=dur)).time()
+            if cen.hour > 20:
+                break
+            ac = await _slot_conflict_list(db, student_id, instructor_id, d, cst, cen)
+            at, _ = await _travel_status(db, instructor, d, cst, cen, is_online=is_online, location=location)
+            if not ac and at in ("ok", "needs_clarification"):
+                alternatives.append({"date": d.isoformat(), "start": cst.strftime("%H:%M"),
+                                     "end": cen.strftime("%H:%M"),
+                                     "status": "available" if at == "ok" else "needs_clarification"})
+                if len(alternatives) >= 3:
+                    break
+        alternatives.sort(key=lambda a: 0 if a["status"] == "available" else 1)
+    return {"status": status_, "message": message,
+            "conflicts": conflicts, "alternatives": alternatives}
+
+
+@router.post("/students/{student_id}/recurring-schedule-change")
+async def recurring_schedule_change(
+    student_id: UUID,
+    body: RecurringChangeIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Preview (confirm=false) or apply an ongoing weekly-schedule change from
+    an effective date: closes the old recurring rows, opens new ones, moves
+    eligible future sessions — preserving completed history, the monthly plan
+    and every other student's schedule.  Conflicts (including insufficient
+    travel time) block the save with specific messages."""
+    student = (await db.execute(select(Student).where(Student.id == student_id))).scalar_one_or_none()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    enrollment = await _resolve_student_enrollment(db, student, body.enrollment_id)
+
+    plan = await _compute_recurring_change(db, student, enrollment, body, current_user)
+
+    if not body.confirm:
+        return {k: v for k, v in plan.items()
+                if k not in ("old_schedule_ids", "template", "_instructor", "_old_rows", "_affected_objs")}
+
+    # ---- save-time revalidation (race safety) ----
+    if plan["hard_conflicts"]:
+        raise HTTPException(status_code=409, detail={
+            "message": "Scheduling conflicts must be resolved before applying the change.",
+            "conflicts": plan["hard_conflicts"],
+        })
+    if plan["requires_travel_ack"] and not body.acknowledge_travel_unknown:
+        raise HTTPException(status_code=409, detail={
+            "message": "Travel time could not be confirmed for some classes — "
+                       "review the warnings and acknowledge to proceed, or fix the location/travel data.",
+            "requires_travel_ack": True,
+            "warnings": plan["warnings"],
+        })
+
+    eff = date.fromisoformat(body.effective_date)
+    # close old recurring rows (history preserved) and open new ones
+    for r in plan["_old_rows"]:
+        r.is_active = False
+        r.end_date = eff - timedelta(days=1)
+        db.add(r)
+    new_rows = []
+    for nd in body.new_days:
+        row = ClassSchedule(
+            id=uuid.uuid4(), enrollment_id=enrollment.id, instructor_id=plan["_instructor"].id,
+            day_of_week=nd.day.lower(), start_time=dtime.fromisoformat(nd.start_time),
+            end_time=dtime.fromisoformat(nd.end_time), frequency="weekly",
+            is_online=plan["template"].is_online, location=plan["template"].location,
+            is_active=True, start_date=eff, end_date=None,
+        )
+        db.add(row)
+        new_rows.append(row)
+
+    # move eligible future sessions (completed/cancelled/past sessions untouched)
+    moved = []
+    for a in plan["affected_sessions"]:
+        sess = (await db.execute(select(ClassSession).where(ClassSession.id == UUID(a["session_id"])))).scalar_one_or_none()
+        if not sess:
+            continue
+        sess.scheduled_date = date.fromisoformat(a["new_date"])
+        sess.scheduled_start = dtime.fromisoformat(a["new_start"])
+        sess.scheduled_end = dtime.fromisoformat(a["new_end"])
+        sess.billing_month = f"{sess.scheduled_date.year:04d}-{sess.scheduled_date.month:02d}"
+        db.add(sess)
+        moved.append({"id": str(sess.id), "date": a["new_date"],
+                      "start": a["new_start"], "end": a["new_end"]})
+
+    await db.flush()
+    await record_audit(
+        db, action="student.recurring_schedule_changed", entity_type="student", entity_id=str(student_id),
+        actor_user_id=current_user.id, actor_role=current_user.role.value,
+        summary=f"Recurring schedule changed for {student.full_name} effective {eff.isoformat()}: "
+                + ", ".join(f"{r['day']} {r['start_time']}-{r['end_time']}" for r in plan["proposed"])
+                + f" — {len(moved)} future class(es) moved"
+                + (f" (reason: {body.reason})" if body.reason else ""),
+    )
+    return {
+        "applied": True,
+        "effective_date": eff.isoformat(),
+        "schedule_closed": len(plan["_old_rows"]),
+        "schedule_created": len(new_rows),
+        "sessions_moved": moved,
+        "requires_travel_ack": plan["requires_travel_ack"],
+        "warnings": plan["warnings"],
+    }
+
+
+# ========================================
 # Instructor account management (admin CRUD)
 # ========================================
 class AdminInstructorCreate(BaseModel):
@@ -1862,6 +2370,7 @@ class AdminInstructorCreate(BaseModel):
 
 class AdminInstructorUpdate(BaseModel):
     username: Optional[str] = None
+    email: Optional[str] = None          # empty string clears the address
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     phone: Optional[str] = None
@@ -1870,6 +2379,7 @@ class AdminInstructorUpdate(BaseModel):
     experience_years: Optional[str] = None
     bio: Optional[str] = None
     is_active: Optional[bool] = None
+    travel_buffer_minutes: Optional[int] = None   # 0..600; null clears (travel unknown)
     acknowledge_future_classes: Optional[bool] = False
 
 
@@ -2010,6 +2520,19 @@ async def admin_update_instructor(
             raise HTTPException(status_code=409, detail="That login ID is already in use")
         user.username = new_username
         db.add(user)
+    if body.email is not None and user:
+        new_email = body.email.strip().lower()
+        if new_email and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", new_email):
+            raise HTTPException(status_code=400, detail="Invalid email address")
+        if new_email:
+            clash = (await db.execute(
+                select(User).where(User.email == new_email, User.id != user.id))).scalar_one_or_none()
+            if clash:
+                raise HTTPException(status_code=409, detail="That email is already in use")
+        user.email = new_email or None
+        db.add(user)
+        before["email"] = user.email
+        after_email = user.email
     if body.first_name is not None and body.first_name.strip():
         instructor.first_name = body.first_name.strip()
     if body.last_name is not None:
@@ -2018,6 +2541,11 @@ async def admin_update_instructor(
         value = getattr(body, field)
         if value is not None:
             setattr(instructor, field, value.strip() or None)
+    if body.travel_buffer_minutes is not None:
+        if body.travel_buffer_minutes < 0 or body.travel_buffer_minutes > 600:
+            raise HTTPException(status_code=400,
+                                detail="Travel buffer must be between 0 and 600 minutes")
+        instructor.travel_buffer_minutes = body.travel_buffer_minutes
     if body.is_active is not None:
         instructor.is_active = body.is_active
         if user:
@@ -2033,14 +2561,19 @@ async def admin_update_instructor(
         actor_user_id=current_user.id,
         actor_role=current_user.role.value,
         before_data=before,
-        after_data={"is_active": bool(instructor.is_active), "specializations": instructor.specializations},
+        after_data={"is_active": bool(instructor.is_active),
+                    "specializations": instructor.specializations,
+                    **({"email": after_email} if body.email is not None else {})},
         summary=f"{instructor.first_name} {instructor.last_name}: "
-                + ("deactivated" if body.is_active is False else "updated"),
+                + ("deactivated" if body.is_active is False else "updated")
+                + (f" (email → {after_email})" if body.email is not None else ""),
     )
     result = await db.execute(select(Instructor).where(Instructor.id == instructor.id))
     i = result.scalar_one()
+    u2 = (await db.execute(select(User).where(User.id == i.user_id))).scalar_one_or_none()
     return {"id": str(i.id), "is_active": bool(i.is_active),
-            "name": f"{i.first_name} {i.last_name}", "specializations": i.specializations}
+            "name": f"{i.first_name} {i.last_name}", "specializations": i.specializations,
+            "phone": i.phone, "email": (u2.email if u2 else None)}
 
 
 @router.delete("/instructors/{instructor_id}")

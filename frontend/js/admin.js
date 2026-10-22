@@ -1390,7 +1390,9 @@ const Admin = (function() {
                 <div class="admin-card">
                     <div class="admin-card__body" style="padding: 0;">
                         ${students.length > 0 ? `
-                            <table class="admin-table">
+                            <div class="table-scroll-outer">
+                                <div class="table-scroll" tabindex="0" aria-label="Students table — scroll horizontally for all columns and actions">
+                                    <table class="admin-table">
                                 <thead>
                                     <tr>
                                         <th>CMA ID</th>
@@ -1426,7 +1428,10 @@ const Admin = (function() {
                                         </tr>
                                     `).join('')}
                                 </tbody>
-                            </table>
+                                    </table>
+                                </div>
+                                <div class="table-scroll-hint">Scroll sideways for all columns &amp; actions →</div>
+                            </div>
                         ` : `
                             <div class="admin-empty">
                                 <div class="admin-empty__icon"> ${icon("students")}</div>
@@ -1806,15 +1811,29 @@ const Admin = (function() {
             const pending = (payments || []).filter(p => p.status === 'pending_verification');
             const pendingRows = pending.map(p => {
                 const inv = p.invoice_id ? invoiceById[p.invoice_id] : null;
+                const studentCell = p.student_name
+                    ? `<strong>${escapeHtml(p.student_name)}</strong>
+                       <div style="font-size:0.72rem;color:var(--color-text-muted)">${escapeHtml(p.cma_registration_id || '')}${p.invoice_number ? ' · ' + escapeHtml(p.invoice_number) : ''}${p.fee_label ? '<br>' + escapeHtml(p.fee_label) : ''}</div>`
+                    : (inv || p.claim_unlinked
+                        ? `<span style="color:var(--color-warning)">⚠ Unlinked claim — resolve</span>
+                           <div style="font-size:0.72rem;color:var(--color-text-muted)">${escapeHtml((p.method || p.provider) + ' claim, no student/fee association')}</div>`
+                        : '—');
+                const expected = (p.expected_paise != null)
+                    ? `₹${(p.expected_paise / 100).toFixed(2)}${p.outstanding_paise ? `<div style="font-size:0.72rem;color:var(--color-text-muted)">₹${(p.outstanding_paise / 100).toFixed(2)} due</div>` : ''}`
+                    : '—';
                 return `<tr>
-                    <td><strong>${escapeHtml(nameOf[(inv || {}).student_id] || (inv || {}).student_id || '—')}</strong>
-                        ${inv ? `<div style="font-size:0.72rem;color:var(--color-text-muted)">${escapeHtml(inv.invoice_number)} · ${escapeHtml(inv.billing_month)}</div>` : ''}</td>
+                    <td>${studentCell}</td>
+                    <td>${expected}</td>
                     <td>₹${(p.amount_paise / 100).toFixed(2)}</td>
                     <td>${escapeHtml(p.method || p.provider)}</td>
-                    <td>${p.paid_at ? formatDate(p.paid_at) : '—'}</td>
+                    <td>${p.paid_at ? formatDate(p.paid_at) : (p.created_at ? formatDate(p.created_at) : '—')}</td>
                     <td>${escapeHtml(p.provider_payment_id || '—')}</td>
-                    <td><span class="badge badge--pending">Pending Verification</span></td>
-                    <td><button class="btn btn--primary btn--sm" onclick="Admin.feeConfirmPayment('${p.id}')">Confirm &amp; Mark Paid</button></td>
+                    <td><span class="badge badge--pending">Awaiting verification</span></td>
+                    <td style="white-space:nowrap">
+                        <button class="btn btn--primary btn--sm" onclick="Admin.feeConfirmPayment('${p.id}')">Verify &amp; Mark Paid</button>
+                        <button class="btn btn--secondary btn--sm" onclick="Admin.feeClarifyPayment('${p.id}')">Request clarification</button>
+                        <button class="btn btn--secondary btn--sm" onclick="Admin.feeRejectPayment('${p.id}')">Reject claim</button>
+                    </td>
                 </tr>`;
             }).join('');
 
@@ -1869,10 +1888,28 @@ const Admin = (function() {
                     <div style="padding:14px 16px 0"><h3 class="admin-card__title">Payments Awaiting Verification (${pending.length})</h3>
                     <div style="font-size:0.78rem;color:var(--color-text-muted);margin-bottom:8px">Online and family-reported payments appear here. Mark a payment as Paid only after verifying the transaction — this updates the student's fee status and issues the receipt.</div></div>
                     ${pendingRows ? `<table class="admin-table"><thead><tr>
-                        <th>Student / fee</th><th>Amount</th><th>Method</th><th>Date</th><th>Reference</th><th>Status</th><th></th>
+                        <th>Student / fee</th><th>Expected</th><th>Reported</th><th>Method</th><th>Submitted</th><th>Reference</th><th>Status</th><th></th>
                     </tr></thead><tbody>${pendingRows}</tbody></table>`
                     : '<div style="padding:12px 16px;color:var(--color-text-muted);font-size:0.85rem">No payments awaiting verification</div>'}
                 </div></div>
+                ${(function () {
+                    const rejected = (payments || []).filter(p => p.status === 'rejected').slice(0, 8);
+                    if (!rejected.length) return '';
+                    return `<div class="admin-card" style="margin-bottom:12px"><div class="admin-card__body" style="padding:0">
+                        <div style="padding:14px 16px 0"><h3 class="admin-card__title">Rejected claims (${rejected.length}${(payments || []).filter(p => p.status === 'rejected').length > 8 ? ' recent' : ''})</h3>
+                        <div style="font-size:0.78rem;color:var(--color-text-muted);margin-bottom:8px">Rejected claims never change collected totals or outstanding balances. Rejected students keep the response (and any attachment) in their portal.</div></div>
+                        <table class="admin-table"><thead><tr>
+                            <th>Student / fee</th><th>Reported</th><th>Method</th><th>Reference</th><th>Status</th><th>Reason</th></tr></thead><tbody>
+                            ${rejected.map(p => `<tr>
+                                <td>${p.student_name ? `<strong>${escapeHtml(p.student_name)}</strong><div style="font-size:0.72rem;color:var(--color-text-muted)">${escapeHtml(p.cma_registration_id || '')}${p.invoice_number ? ' · ' + escapeHtml(p.invoice_number) : ''}</div>` : '<span style="color:var(--color-warning)">⚠ Unlinked claim</span>'}</td>
+                                <td>₹${(p.amount_paise / 100).toFixed(2)}</td>
+                                <td>${escapeHtml(p.method || p.provider)}</td>
+                                <td>${escapeHtml(p.provider_payment_id || '—')}</td>
+                                <td><span class="badge badge--rejected">Rejected claim</span></td>
+                                <td style="font-size:0.8rem">${escapeHtml(((p.notes || '').split('Rejected [')[1] || '').split(']')[0] || '—')}</td>
+                            </tr>`).join('')}
+                        </tbody></table></div></div>`;
+                })()}
                 <div class="admin-card" style="margin-bottom:12px"><div class="admin-card__body" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
                     <button class="btn btn--secondary btn--sm" onclick="Admin.shiftFeeMonth(-1)">◀</button>
                     <strong style="min-width:180px;text-align:center">${feeMonthLabel(feeState.month)}</strong>
@@ -2171,6 +2208,131 @@ const Admin = (function() {
             showToast('Credit applied.', 'success');
             renderFees();
         } catch (e) { err.textContent = e.message; err.style.display = 'block'; }
+    }
+
+    const CLAIM_REASONS = [
+        'No payment received',
+        'Amount does not match the reported amount',
+        'Amount is below the required amount',
+        'Incorrect transaction reference',
+        'Duplicate payment submission',
+        'Invalid or missing proof',
+        'Wrong student or package',
+        'Other',
+    ];
+    const CLAIM_REASON_MESSAGES = {
+        'No payment received': 'We could not verify the payment against the required fee. Please check the amount and submit the correct transaction details.',
+        'Amount does not match the reported amount': 'The amount reported does not match our records for this fee. Please review the statement and submit the correct transaction details.',
+        'Amount is below the required amount': 'The amount reported is lower than the selected package fee. Please contact the Academy before submitting another claim.',
+        'Incorrect transaction reference': 'We could not locate a matching payment using the submitted reference. Please provide a valid transaction reference and proof.',
+        'Duplicate payment submission': 'This looks like a duplicate of an earlier submission. Please contact the Academy if you believe this is a mistake.',
+        'Invalid or missing proof': 'The submitted proof could not be accepted (missing or unreadable). Please attach a clear PDF, JPG, PNG or WebP of the payment confirmation.',
+        'Wrong student or package': 'This claim appears to be linked to the wrong student or fee package. Please contact the Academy to correct it.',
+        'Other': 'Please contact the Academy for details about this payment claim.',
+    };
+
+    async function _claimAction(paymentId, action, fields, file) {
+        const token = localStorage.getItem('academy_token');
+        const fd = new FormData();
+        Object.entries(fields).forEach(([k, v]) => fd.append(k, v));
+        if (file) fd.append('file', file);
+        const resp = await fetch(`${API_BASE}/payments/${paymentId}/${action}`, {
+            method: 'POST',
+            headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+            body: fd,
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            const detail = data.detail;
+            throw new Error(typeof detail === 'string' ? detail
+                : (detail && detail.message) || 'Request failed');
+        }
+        return data;
+    }
+
+    function feeRejectPayment(paymentId) {
+        showModal(`
+            <div class="admin-modal__header"><h3 class="admin-modal__title">Reject payment claim</h3></div>
+            <div class="admin-modal__body">
+                <p style="font-size:0.85rem">Rejecting does <strong>not</strong> change any fee, allocation or collected total — only unverified claims are affected. The student sees your message (with any attachment) in their portal.</p>
+                <div class="admin-modal__field"><label class="auth__label">Reason *</label>
+                    <select class="auth__input" id="frReason" onchange="Admin.claimReasonChanged()">
+                        ${CLAIM_REASONS.map(r => `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`).join('')}
+                    </select></div>
+                <div class="admin-modal__field"><label class="auth__label">Message to student</label>
+                    <textarea class="auth__input" id="frMessage" rows="4">${escapeHtml(CLAIM_REASON_MESSAGES['No payment received'])}</textarea></div>
+                <div class="admin-modal__field"><label class="auth__label">Attachment (PDF, JPG, PNG, WebP — optional)</label>
+                    <input class="auth__input" id="frFile" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/jpeg,image/png,image/webp"></div>
+                <p id="frError" class="auth__error" style="display:none"></p>
+            </div>
+            <div class="admin-modal__footer">
+                <button class="btn btn--secondary" onclick="Admin.closeModalDirect()">Cancel</button>
+                <button class="btn btn--primary" id="frBtn" onclick="Admin.feeRejectSubmit('${paymentId}')">Reject claim</button>
+            </div>`);
+    }
+
+    function claimReasonChanged() {
+        const sel = document.getElementById('frReason');
+        const ta = document.getElementById('frMessage');
+        if (sel && ta && CLAIM_REASON_MESSAGES[sel.value]) ta.value = CLAIM_REASON_MESSAGES[sel.value];
+    }
+
+    async function feeRejectSubmit(paymentId) {
+        const err = document.getElementById('frError');
+        err.style.display = 'none';
+        const btn = document.getElementById('frBtn');
+        try {
+            btn.disabled = true; btn.textContent = 'Rejecting…';
+            const fileEl = document.getElementById('frFile');
+            const res = await _claimAction(paymentId, 'reject', {
+                reason: (document.getElementById('frReason') || {}).value || '',
+                message: (document.getElementById('frMessage') || {}).value || '',
+            }, fileEl && fileEl.files ? fileEl.files[0] : null);
+            closeModalDirect();
+            showToast(res.claim_unlinked
+                ? 'Claim rejected (⚠ no student link — flagged for resolution)'
+                : 'Claim rejected — student notified in their portal', 'success');
+            await renderFees();
+        } catch (e) {
+            err.textContent = e.message; err.style.display = 'block';
+            btn.disabled = false; btn.textContent = 'Reject claim';
+        }
+    }
+
+    function feeClarifyPayment(paymentId) {
+        showModal(`
+            <div class="admin-modal__header"><h3 class="admin-modal__title">Request clarification</h3></div>
+            <div class="admin-modal__body">
+                <p style="font-size:0.85rem">The claim stays <strong>awaiting verification</strong>. Your question (and optional attachment) appears in the student's portal conversation.</p>
+                <div class="admin-modal__field"><label class="auth__label">What do you need from the student? *</label>
+                    <textarea class="auth__input" id="fcqMessage" rows="4" placeholder="e.g. Please share the UPI transaction reference screenshot for ₹4,500 on 21 October."></textarea></div>
+                <div class="admin-modal__field"><label class="auth__label">Attachment (PDF, JPG, PNG, WebP — optional)</label>
+                    <input class="auth__input" id="fcqFile" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/jpeg,image/png,image/webp"></div>
+                <p id="fcqError" class="auth__error" style="display:none"></p>
+            </div>
+            <div class="admin-modal__footer">
+                <button class="btn btn--secondary" onclick="Admin.closeModalDirect()">Cancel</button>
+                <button class="btn btn--primary" id="fcqBtn" onclick="Admin.feeClarifySubmit('${paymentId}')">Send request</button>
+            </div>`);
+    }
+
+    async function feeClarifySubmit(paymentId) {
+        const err = document.getElementById('fcqError');
+        err.style.display = 'none';
+        const btn = document.getElementById('fcqBtn');
+        try {
+            btn.disabled = true; btn.textContent = 'Sending…';
+            const fileEl = document.getElementById('fcqFile');
+            await _claimAction(paymentId, 'clarify', {
+                message: (document.getElementById('fcqMessage') || {}).value || '',
+            }, fileEl && fileEl.files ? fileEl.files[0] : null);
+            closeModalDirect();
+            showToast('Clarification requested — student notified in their portal', 'success');
+            await renderFees();
+        } catch (e) {
+            err.textContent = e.message; err.style.display = 'block';
+            btn.disabled = false; btn.textContent = 'Send request';
+        }
     }
 
     async function feeConfirmPayment(paymentId) {
@@ -2488,10 +2650,10 @@ const Admin = (function() {
                                                 <td><span class="badge badge--${getStatusBadgeClass(s.status)}">${formatStatus(s.status)}</span></td>
                                                 <td>${escapeHtml(s.topics_covered || '—')}</td>
                                             </tr>
-                                        `).join('')}
-                                    </tbody>
-                                </table>
-                            ` : `
+                                    `).join('')}
+                                </tbody>
+                            </table>
+                        ` : `
                                 <div class="admin-empty">
                                     <div class="admin-empty__icon"> ${icon("attendance")}</div>
                                     <div class="admin-empty__title">No sessions recorded</div>
@@ -3742,6 +3904,24 @@ const Admin = (function() {
                 <button class="btn btn--primary btn--sm" onclick="Admin.wsSaveMonthly()">Save schedule</button>
                 <span style="font-size:0.78rem;color:var(--color-text-muted,#706B60);margin-left:8px">Conflicting slots block saving; completed classes are never changed.</span>
             </div>
+            <h3 style="margin-bottom:12px;">Change Recurring Schedule</h3>
+            <p style="font-size:0.8rem;color:var(--color-text-muted);margin-bottom:10px">
+                Move an ongoing weekly class (e.g. Saturday → Sunday, or a holiday time change).
+                Preview checks instructor availability, overlapping intervals and travel time between
+                offline classes before anything is saved. Completed classes and history are never changed.</p>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+                <label>New day
+                    <select id="scDay" style="margin-left:6px" onchange="Admin.wsScInvalidate()">
+                        ${['monday','tuesday','wednesday','thursday','friday','saturday','sunday'].map(d => `<option value="${d}" ${d === 'saturday' ? 'selected' : ''}>${d.charAt(0).toUpperCase()+d.slice(1)}</option>`).join('')}
+                    </select></label>
+                <label>Start <input type="time" id="scStart" value="16:30" onchange="Admin.wsScInvalidate()" style="margin-left:4px"></label>
+                <label>End <input type="time" id="scEnd" value="17:30" onchange="Admin.wsScInvalidate()" style="margin-left:4px"></label>
+                <label>Effective from <input type="date" id="scEff" onchange="Admin.wsScInvalidate()" style="margin-left:4px"></label>
+                <label>Reason <input id="scNote" placeholder="e.g. school-holiday timing" style="margin-left:4px;width:180px"></label>
+                <button class="btn btn--secondary btn--sm" onclick="Admin.wsScPreview()">Preview changes</button>
+                <button class="btn btn--primary btn--sm" id="scApplyBtn" disabled onclick="Admin.wsScApply()">Confirm &amp; apply</button>
+            </div>
+            <div id="scPreviewArea" style="margin-bottom:22px"></div>
             <h3 style="margin-bottom:12px;">Fixed Weekly Timetable</h3>
             ${schedules.length ? `<table class="admin-table"><thead><tr><th>Day</th><th>Time</th><th>Instrument</th><th>Instructor</th><th>Status</th><th></th></tr></thead>
                 <tbody>${schedRows}</tbody></table>`
@@ -4382,10 +4562,14 @@ const Admin = (function() {
         showModal(`
             <div class="admin-modal__header"><h3 class="admin-modal__title">Add Student</h3></div>
             <div class="admin-modal__body">
-                <div class="admin-modal__field"><label class="auth__label">Login ID *</label>
-                    <input class="auth__input" id="nsUser" placeholder="e.g. CMA-015"></div>
+                <div class="admin-modal__field"><label class="auth__label">Login ID (auto-generated)</label>
+                    <input class="auth__input" id="nsUserPreview" readonly tabindex="-1"
+                        style="background:rgba(255,255,255,0.04);color:var(--color-text-muted)"
+                        value="(auto from generated roll)">
+                    <p style="font-size:0.75rem;color:var(--color-text-muted);margin-top:4px">
+                        Derived from the CMA Roll Number — rule: <code>CMA-2026-0015 → CMA-015</code>. The Login ID stays with the account.</p></div>
                 <div class="admin-modal__field"><label class="auth__label">CMA Roll Number (auto if blank)</label>
-                    <input class="auth__input" id="nsCma" placeholder="CMA-2026-0015"></div>
+                    <input class="auth__input" id="nsCma" placeholder="CMA-2026-0015" oninput="Admin.previewLoginId()"></div>
                 <div class="admin-modal__field"><label class="auth__label">First name *</label>
                     <input class="auth__input" id="nsFirst"></div>
                 <div class="admin-modal__field"><label class="auth__label">Last name</label>
@@ -4412,11 +4596,21 @@ const Admin = (function() {
         `);
     }
 
+    // Mirror of backend _login_id_from_roll — display only; the backend
+    // generates the authoritative Login ID on save.
+    function previewLoginId() {
+        const roll = ((document.getElementById('nsCma') || {}).value || '').trim();
+        const out = (document.getElementById('nsUserPreview') || {});
+        const m = /^CMA-\d{4}-(\d+)$/.exec(roll);
+        if (m) out.value = 'CMA-' + String(parseInt(m[1], 10)).padStart(3, '0');
+        else if (roll) out.value = '(derived from roll on save)';
+        else out.value = '(auto from generated roll)';
+    }
+
     async function submitCreateStudent() {
         const err = document.getElementById('nsError');
         const fee = (document.getElementById('nsFee') || {}).value;
         const body = {
-            username: (document.getElementById('nsUser') || {}).value.trim(),
             first_name: (document.getElementById('nsFirst') || {}).value.trim(),
             last_name: (document.getElementById('nsLast') || {}).value.trim(),
             cma_registration_id: (document.getElementById('nsCma') || {}).value.trim() || null,
@@ -4427,8 +4621,8 @@ const Admin = (function() {
             fee_plan: fee || null,
             fee_amount: fee === '4_classes' ? 4500 : fee === '8_classes' ? 8000 : null,
         };
-        if (!body.username || !body.first_name) {
-            err.textContent = 'Login ID and first name are required.';
+        if (!body.first_name) {
+            err.textContent = 'First name is required.';
             err.style.display = 'block';
             return;
         }
@@ -4697,6 +4891,135 @@ const Admin = (function() {
     }
 
     // ========================================
+    // Recurring schedule change (availability + travel preview)
+    // ========================================
+    function wsScFields() {
+        return {
+            day: (document.getElementById('scDay') || {}).value || 'saturday',
+            start_time: (document.getElementById('scStart') || {}).value || '',
+            end_time: (document.getElementById('scEnd') || {}).value || '',
+            effective_date: (document.getElementById('scEff') || {}).value || '',
+            reason: ((document.getElementById('scNote') || {}).value || '').trim(),
+        };
+    }
+
+    function wsScInvalidate() {
+        const btn = document.getElementById('scApplyBtn');
+        if (btn) btn.disabled = true;
+        const area = document.getElementById('scPreviewArea');
+        if (area) area.innerHTML = '';
+    }
+
+    function _scStatusBadge(st) {
+        const map = { available: 'approved', ok: 'approved', conflict: 'rejected',
+                      travel_insufficient: 'rejected', duplicate_target: 'rejected',
+                      needs_clarification: 'pending' };
+        const label = { available: 'Available', ok: 'Available', conflict: 'Class conflict',
+                        travel_insufficient: 'Travel time insufficient', duplicate_target: 'Already scheduled',
+                        needs_clarification: 'Travel data missing — clarification' }[st] || st;
+        return `<span class="badge badge--${map[st] || 'pending'}">${label}</span>`;
+    }
+
+    function _scRenderPreview(data, opts) {
+        const area = document.getElementById('scPreviewArea');
+        if (!area) return;
+        const props = (data.proposed || []).map(pr => `
+            <tr><td>${pr.day.charAt(0).toUpperCase()+pr.day.slice(1)}s ${pr.start_time}–${pr.end_time}
+                <div style="font-size:0.72rem;color:var(--color-text-muted)">first from ${formatDate(pr.first_occurrence)}</div></td>
+                <td>${_scStatusBadge(pr.status)}${pr.message ? `<div style="font-size:0.75rem">${escapeHtml(pr.message)}</div>` : ''}
+                ${(pr.alternatives && pr.alternatives.length) ? `<div style="font-size:0.75rem;color:var(--color-accent)">Alternatives: ${pr.alternatives.map(a => a.start + '–' + a.end).join(', ')}</div>` : ''}</td></tr>`).join('');
+        const aff = (data.affected_sessions || []).map(a => `
+            <tr><td>${formatDate(a.old_date)} ${a.old_start}–${a.old_end}</td>
+                <td>→ ${formatDate(a.new_date)} ${a.new_start}–${a.new_end}</td>
+                <td>${_scStatusBadge(a.status)}${a.message ? `<div style="font-size:0.75rem">${escapeHtml(a.message)}</div>` : ''}</td></tr>`).join('');
+        const warns = (data.warnings && data.warnings.length)
+            ? `<div style="border:1px solid var(--color-warning);border-radius:8px;padding:8px10px;margin:8px 0;color:var(--color-warning);font-size:0.8rem">
+                 <b>Travel could not be confirmed:</b><br>${data.warnings.map(w => '• ' + escapeHtml(w)).join('<br>')}
+                 ${data.requires_travel_ack ? `<label style="display:block;margin-top:6px"><input type="checkbox" id="scAck"> I acknowledge the travel-data warnings and want to proceed</label>` : ''}</div>`
+            : '';
+        const conflictBox = (data.conflicts && data.conflicts.length)
+            ? `<div style="border:1px solid var(--color-warning);border-radius:8px;padding:8px 10px;margin:8px 0;color:var(--color-warning);font-size:0.8rem">
+                 <b>Conflicts — nothing was applied:</b><br>${data.conflicts.map(c => '• ' + escapeHtml(c.message)).join('<br>')}</div>`
+            : '';
+        area.innerHTML = `
+            ${conflictBox}
+            ${warns}
+            <table class="admin-table" style="margin-bottom:8px"><thead><tr><th>Proposed pattern (from ${escapeHtml(data.effective_date || '')})</th><th>Availability</th></tr></thead><tbody>${props}</tbody></table>
+            ${(data.affected_sessions && data.affected_sessions.length) ? `
+                <div style="font-size:0.8rem;font-weight:600;margin:6px 0">Future classes that will change (${data.affected_sessions.length}):</div>
+                <table class="admin-table"><thead><tr><th>Current</th><th>New slot</th><th>Check</th></tr></thead><tbody>${aff}</tbody></table>`
+                : `<p style="font-size:0.8rem;color:var(--color-text-muted)">No eligible future classes to move yet (only the recurring pattern will change).</p>`}
+            ${opts && opts.applied ? `<div style="color:var(--color-success,#2E7D32);font-size:0.85rem;margin-top:6px">Applied — ${escapeHtml(opts.applied)}</div>` : ''}
+        `;
+    }
+
+    async function wsScPreview() {
+        const f = wsScFields();
+        if (!f.effective_date) { showToast('Choose the effective date first', 'error'); return; }
+        const sid = studentWs.studentId;
+        try {
+            const token = localStorage.getItem('academy_token');
+            const resp = await fetch(apiOrigin() + `/api/v1/admin/students/${sid}/recurring-schedule-change`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
+                body: JSON.stringify({ ...f, new_days: [{ day: f.day, start_time: f.start_time, end_time: f.end_time }], confirm: false }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                const detail = data.detail || {};
+                _scRenderPreview({ ...f, proposed: [], affected_sessions: [], warnings: detail.warnings || [], requires_travel_ack: false, conflicts: typeof detail === 'object' && detail.conflicts ? detail.conflicts : [{ message: typeof detail === 'string' ? detail : 'Preview failed' }] }, {});
+                return;
+            }
+            studentWs.schedChangePreview = data;
+            _scRenderPreview(data, {});
+            const btn = document.getElementById('scApplyBtn');
+            if (btn) btn.disabled = false;
+        } catch (e) { showToast(e.message || 'Preview failed', 'error'); }
+    }
+
+    async function wsScApply() {
+        const f = wsScFields();
+        if (!f.effective_date) { showToast('Choose the effective date first', 'error'); return; }
+        const ackEl = document.getElementById('scAck');
+        const sid = studentWs.studentId;
+        try {
+            const token = localStorage.getItem('academy_token');
+            const resp = await fetch(apiOrigin() + `/api/v1/admin/students/${sid}/recurring-schedule-change`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
+                body: JSON.stringify({
+                    ...f,
+                    new_days: [{ day: f.day, start_time: f.start_time, end_time: f.end_time }],
+                    confirm: true,
+                    acknowledge_travel_unknown: !!(ackEl && ackEl.checked),
+                }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                const detail = data.detail || {};
+                _scRenderPreview({ ...f, proposed: (studentWs.schedChangePreview || {}).proposed || [],
+                                   affected_sessions: (studentWs.schedChangePreview || {}).affected_sessions || [],
+                                   warnings: detail.warnings || (studentWs.schedChangePreview || {}).warnings || [],
+                                   requires_travel_ack: !!detail.requires_travel_ack,
+                                   conflicts: detail.conflicts || (typeof detail === 'string' ? [{ message: detail }] : []) }, {});
+                const btn = document.getElementById('scApplyBtn');
+                if (btn) btn.disabled = true;
+                showToast('Change not applied — resolve the conflicts shown', 'error');
+                return;
+            }
+            const applied = `effective ${data.effective_date} · ${data.sessions_moved.length} future class(es) moved`;
+            showToast('Recurring schedule updated', 'success');
+            studentWs.schedChangePreview = null;
+            delete studentWs.data.classes;
+            await loadWsTab('classes');
+            render();
+            const area = document.getElementById('scPreviewArea');
+            if (area) area.insertAdjacentHTML('afterbegin',
+                `<div style="color:var(--color-success,#2E7D32);font-size:0.85rem;margin-bottom:6px">✓ Applied — ${escapeHtml(applied)}</div>`);
+        } catch (e) { showToast(e.message || 'Apply failed', 'error'); }
+    }
+
+    // ========================================
     // Instructor account management
     // ========================================
     function createInstructorModal() {
@@ -4711,6 +5034,8 @@ const Admin = (function() {
                     <input class="auth__input" id="niLast"></div>
                 <div class="admin-modal__field"><label class="auth__label">Phone</label>
                     <input class="auth__input" id="niPhone"></div>
+                <div class="admin-modal__field"><label class="auth__label">Email address</label>
+                    <input class="auth__input" id="niEmail" type="email" placeholder="name@example.com"></div>
                 <div class="admin-modal__field"><label class="auth__label">Specialisations</label>
                     <input class="auth__input" id="niSpec" placeholder="e.g. Piano, Western Vocals"></div>
                 <div class="admin-modal__field"><label class="auth__label">Qualifications</label>
@@ -4737,6 +5062,7 @@ const Admin = (function() {
             specializations: (document.getElementById('niSpec') || {}).value.trim() || null,
             qualifications: (document.getElementById('niQual') || {}).value.trim() || null,
             experience_years: (document.getElementById('niExp') || {}).value.trim() || null,
+            email: (document.getElementById('niEmail') || {}).value.trim() || null,
         };
         if (!body.username || !body.first_name) {
             err.textContent = 'Login ID and first name are required.';
@@ -4783,12 +5109,17 @@ const Admin = (function() {
                         <input class="auth__input" id="eiLast" value="${escapeHtml(i.last_name || '')}"></div>
                     <div class="admin-modal__field"><label class="auth__label">Phone</label>
                         <input class="auth__input" id="eiPhone" value="${escapeHtml(i.phone || '')}"></div>
+                    <div class="admin-modal__field"><label class="auth__label">Email address</label>
+                        <input class="auth__input" id="eiEmail" type="email" placeholder="name@example.com" value="${escapeHtml(i.email || '')}"></div>
                     <div class="admin-modal__field"><label class="auth__label">Specialisations</label>
                         <input class="auth__input" id="eiSpec" value="${escapeHtml(i.specializations || '')}"></div>
                     <div class="admin-modal__field"><label class="auth__label">Qualifications</label>
                         <input class="auth__input" id="eiQual" value="${escapeHtml(i.qualifications || '')}"></div>
                     <div class="admin-modal__field"><label class="auth__label">Experience (years)</label>
                         <input class="auth__input" id="eiExp" value="${escapeHtml(i.experience_years || '')}"></div>
+                    <div class="admin-modal__field"><label class="auth__label">Travel buffer between offline classes (minutes)</label>
+                        <input class="auth__input" id="eiTravel" type="number" min="0" max="600" placeholder="e.g. 30 — blank = cannot confirm travel"
+                            value="${i.travel_buffer_minutes != null ? i.travel_buffer_minutes : ''}"></div>
                     <p id="eiError" class="auth__error" style="display:none"></p>
                 </div>
                 <div class="admin-modal__footer">
@@ -4805,10 +5136,13 @@ const Admin = (function() {
             first_name: (document.getElementById('eiFirst') || {}).value,
             last_name: (document.getElementById('eiLast') || {}).value,
             phone: (document.getElementById('eiPhone') || {}).value,
+            email: (document.getElementById('eiEmail') || {}).value.trim(),
             specializations: (document.getElementById('eiSpec') || {}).value,
             qualifications: (document.getElementById('eiQual') || {}).value,
             experience_years: (document.getElementById('eiExp') || {}).value,
         };
+        const travel = (document.getElementById('eiTravel') || {}).value;
+        if (travel !== '' && travel != null) body.travel_buffer_minutes = parseInt(travel, 10);
         try {
             const btn = document.getElementById('eiBtn');
             btn.disabled = true; btn.textContent = 'Saving…';
@@ -5934,6 +6268,11 @@ const Admin = (function() {
         feeConfirmPayment(id) {
             feeConfirmPayment(id);
         },
+        feeRejectPayment(id) { feeRejectPayment(id); },
+        feeRejectSubmit(id) { feeRejectSubmit(id); },
+        feeClarifyPayment(id) { feeClarifyPayment(id); },
+        feeClarifySubmit(id) { feeClarifySubmit(id); },
+        claimReasonChanged() { claimReasonChanged(); },
         confirmFeePaymentSubmit(id) {
             confirmFeePaymentSubmit(id);
         },
@@ -6066,6 +6405,10 @@ const Admin = (function() {
         deleteStudentPermanently(id) {
             deleteStudentPermanently(id);
         },
+        previewLoginId() { previewLoginId(); },
+        wsScPreview() { wsScPreview(); },
+        wsScApply() { wsScApply(); },
+        wsScInvalidate() { wsScInvalidate(); },
         wsChangeMonth(v) { wsChangeMonth(v); },
         wsMonthlyReload() { wsMonthlyReload(); },
         wsAddSlot() { wsAddSlot(); },

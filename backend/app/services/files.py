@@ -19,6 +19,7 @@ _MAGIC_CHECKS = {
     "application/pdf": lambda h: h.startswith(b"%PDF"),
     "image/jpeg": lambda h: h.startswith(b"\xff\xd8\xff"),
     "image/png": lambda h: h.startswith(b"\x89PNG\r\n\x1a\n"),
+    "image/webp": lambda h: h[:4] == b"RIFF" and h[8:11] == b"WEBP",
     "audio/mpeg": lambda h: h.startswith(b"ID3") or h[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"),
 }
 
@@ -26,10 +27,13 @@ EXT_BY_TYPE = {
     "application/pdf": ".pdf",
     "image/jpeg": ".jpg",
     "image/png": ".png",
+    "image/webp": ".webp",
     "audio/mpeg": ".mp3",
 }
 
 BASE_HOMEWORK_TYPES = {"application/pdf", "image/jpeg", "image/png"}
+# rejection/clarification evidence attached by administrators (spec: PDF, JPEG, PNG, WebP)
+PAYMENT_EVIDENCE_TYPES = {"application/pdf", "image/jpeg", "image/png", "image/webp"}
 AUDIO_TYPES = {"audio/mpeg"}
 
 
