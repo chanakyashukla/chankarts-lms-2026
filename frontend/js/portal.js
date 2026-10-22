@@ -1789,7 +1789,7 @@ const Portal = (function () {
             if (action === 'view-receipt') return openAuthedBlob('/billing/payments/' + id + '/receipt', 'receipt.html');
             if (action === 'export-statement') {
                 const sid = state.statement && state.statement.students[0] ? state.statement.students[0].student_id : '';
-                return openAuthedBlob('/billing/statement/export?' + (state.role === 'parent' ? 'family=1' : 'student_id=' + sid), 'statement.csv');
+                return openAuthedBlob('/billing/statement/export?' + (state.role === 'parent' ? 'family=1' : 'student_id=' + sid), 'chankarts-fee-statement.csv');
             }
             if (action === 'send-support') return sendSupport();
             if (action === 'open-support') return openSupportThread(id);
