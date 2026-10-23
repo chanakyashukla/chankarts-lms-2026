@@ -253,11 +253,15 @@ async def test_student_cannot_create_session(client, student_user, enrollment):
 
 @pytest.mark.asyncio
 async def test_flag_reschedule_and_history(client, admin_user, enrollment):
+    # dynamic dates: flagging requires ≥24h notice before class start
+    from datetime import date as _date, timedelta as _td
+    d_flag = (_date.today() + _td(days=2)).isoformat()
+    d_move = (_date.today() + _td(days=3)).isoformat()
     created = await client.post(
         "/api/v1/sessions",
         json={
             "enrollment_id": str(enrollment.id),
-            "scheduled_date": "2026-10-24",
+            "scheduled_date": d_flag,
             "scheduled_start": "10:00",
             "scheduled_end": "11:00",
         },
@@ -275,7 +279,7 @@ async def test_flag_reschedule_and_history(client, admin_user, enrollment):
 
     replacement = await client.post(
         f"/api/v1/sessions/{sid}/reschedule",
-        json={"new_date": "2026-10-25", "new_start": "10:00", "new_end": "11:00", "reason": "Faculty recovered"},
+        json={"new_date": d_move, "new_start": "10:00", "new_end": "11:00", "reason": "Faculty recovered"},
         headers=auth(admin_user),
     )
     assert replacement.status_code == 201, replacement.text

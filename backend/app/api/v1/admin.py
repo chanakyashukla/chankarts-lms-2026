@@ -2187,6 +2187,8 @@ async def _compute_recurring_change(db: AsyncSession, student, enrollment, body:
     return {
         "effective_date": eff.isoformat(),
         "reason": body.reason,
+        "instructor_id": str(instructor_id),
+        "instructor_name": f"{instructor.first_name} {instructor.last_name}",
         "current_schedule": [
             {"id": str(r.id), "day": r.day_of_week,
              "start_time": r.start_time.strftime("%H:%M"), "end_time": r.end_time.strftime("%H:%M")} for r in old_rows],
@@ -2329,9 +2331,17 @@ async def recurring_schedule_change(
         sess.scheduled_start = dtime.fromisoformat(a["new_start"])
         sess.scheduled_end = dtime.fromisoformat(a["new_end"])
         sess.billing_month = f"{sess.scheduled_date.year:04d}-{sess.scheduled_date.month:02d}"
+        # classes follow the instructor chosen for the new pattern
+        sess.instructor_id = plan["_instructor"].id
         db.add(sess)
         moved.append({"id": str(sess.id), "date": a["new_date"],
                       "start": a["new_start"], "end": a["new_end"]})
+
+    # keep the enrolment's assigned instructor in step with the pattern
+    instructor_changed = enrollment.instructor_id != plan["_instructor"].id
+    if instructor_changed:
+        enrollment.instructor_id = plan["_instructor"].id
+        db.add(enrollment)
 
     await db.flush()
     await record_audit(
@@ -2340,6 +2350,7 @@ async def recurring_schedule_change(
         summary=f"Recurring schedule changed for {student.full_name} effective {eff.isoformat()}: "
                 + ", ".join(f"{r['day']} {r['start_time']}-{r['end_time']}" for r in plan["proposed"])
                 + f" — {len(moved)} future class(es) moved"
+                + (f"; instructor → {plan['instructor_name']}" if instructor_changed else "")
                 + (f" (reason: {body.reason})" if body.reason else ""),
     )
     return {
@@ -2348,6 +2359,9 @@ async def recurring_schedule_change(
         "schedule_closed": len(plan["_old_rows"]),
         "schedule_created": len(new_rows),
         "sessions_moved": moved,
+        "instructor_id": plan["instructor_id"],
+        "instructor_name": plan["instructor_name"],
+        "enrollment_instructor_changed": instructor_changed,
         "requires_travel_ack": plan["requires_travel_ack"],
         "warnings": plan["warnings"],
     }

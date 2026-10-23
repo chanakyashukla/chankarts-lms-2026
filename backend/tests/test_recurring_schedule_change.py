@@ -355,3 +355,50 @@ async def test_entitlement_and_availability_endpoint(client, admin_user):
         f"?date=2026-11-04&start_time=10:00&end_time=11:00", headers=h)
     b = r2.json()
     assert b["status"] == "conflict" and b["alternatives"]
+
+
+@pytest.mark.asyncio
+async def test_change_assigns_new_instructor(client, admin_user):
+    """Day/time change may also switch the instructor: the new pattern row,
+    every moved future session and the enrolment all follow the choice."""
+    h = auth(admin_user)
+    w = await _mk_world()   # weekly Saturday with instructor "Changer"
+    # a second instructor
+    async with TestSessionLocal() as s:
+        iu = User(id=uuid.uuid4(), username="otherins", hashed_password=get_password_hash("1234"),
+                  role=UserRole.INSTRUCTOR, is_active=True, must_change_pin=False)
+        s.add(iu)
+        await s.flush()
+        ins2 = Instructor(id=uuid.uuid4(), user_id=iu.id, first_name="Other", last_name="T",
+                          is_active=True)
+        s.add(ins2)
+        await s.commit()
+        ins2_id = ins2.id
+    fut = await _add_session(w["student"], w["enrollment"], w["instructor"],
+                             date(2026, 11, 7), time(16, 30), time(17, 30))
+
+    body = {"new_days": [{"day": "sunday", "start_time": "15:00", "end_time": "16:00"}],
+            "effective_date": "2026-11-01", "instructor_id": str(ins2_id),
+            "confirm": False}
+    p = await client.post(f"/api/v1/admin/students/{w['student']}/recurring-schedule-change",
+                          json=body, headers=h)
+    assert p.status_code == 200, p.text
+    assert p.json()["instructor_name"] == "Other T"
+
+    body["confirm"] = True
+    a = await client.post(f"/api/v1/admin/students/{w['student']}/recurring-schedule-change",
+                          json=body, headers=h)
+    assert a.status_code == 200, a.text
+    assert a.json()["enrollment_instructor_changed"] is True
+    assert a.json()["instructor_name"] == "Other T"
+
+    async with TestSessionLocal() as s:
+        sess = (await s.execute(select(ClassSession).where(ClassSession.id == uuid.UUID(str(fut))))).scalar_one()
+        assert sess.instructor_id == ins2_id          # moved class follows the new instructor
+        assert sess.scheduled_date == date(2026, 11, 8) and sess.scheduled_start == time(15, 0)
+        new_row = (await s.execute(select(ClassSchedule).where(
+            ClassSchedule.enrollment_id == uuid.UUID(str(w["enrollment"])),
+            ClassSchedule.is_active.is_(True)))).scalars().one()
+        assert new_row.instructor_id == ins2_id and new_row.day_of_week == "sunday"
+        enr = (await s.execute(select(Enrollment).where(Enrollment.id == uuid.UUID(str(w["enrollment"]))))).scalar_one()
+        assert enr.instructor_id == ins2_id            # enrolment's assigned instructor updated

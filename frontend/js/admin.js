@@ -3821,7 +3821,9 @@ const Admin = (function() {
                 <td>${escapeHtml(sc.instrument || '-')}</td>
                 <td>${sc.instructor_name ? escapeHtml(sc.instructor_name) : '<span style="color:var(--color-warning)">Unassigned</span>'}</td>
                 <td>${sc.is_active ? 'Active' : 'Inactive'}</td>
-                <td><button class="btn btn--secondary btn--sm" onclick="Admin.assignInstructor('${sc.enrollment_id}','${sc.day_of_week}','${sc.start_time.slice(0,5)}','${sc.end_time.slice(0,5)}')">${sc.instructor_name ? 'Change' : 'Assign'}</button></td>
+                <td style="white-space:nowrap">
+                    <button class="btn btn--primary btn--sm" onclick="Admin.wsScPrefill('${sc.day_of_week}','${sc.start_time.slice(0,5)}','${sc.end_time.slice(0,5)}','${escapeHtml(sc.instructor_name || '')}')">Change day/time…</button>
+                    <button class="btn btn--secondary btn--sm" onclick="Admin.assignInstructor('${sc.enrollment_id}','${sc.day_of_week}','${sc.start_time.slice(0,5)}','${sc.end_time.slice(0,5)}')">${sc.instructor_name ? 'Reassign instructor' : 'Assign instructor'}</button></td>
             </tr>`).join('');
 
         const reqRows = requests.map(r => `
@@ -3905,19 +3907,26 @@ const Admin = (function() {
                 <span style="font-size:0.78rem;color:var(--color-text-muted,#706B60);margin-left:8px">Conflicting slots block saving; completed classes are never changed.</span>
             </div>
             <h3 style="margin-bottom:12px;">Change Recurring Schedule</h3>
-            <p style="font-size:0.8rem;color:var(--color-text-muted);margin-bottom:10px">
-                Move an ongoing weekly class (e.g. Saturday → Sunday, or a holiday time change).
-                Preview checks instructor availability, overlapping intervals and travel time between
-                offline classes before anything is saved. Completed classes and history are never changed.</p>
+            <p style="font-size:0.8rem;color:var(--color-text-muted);margin-bottom:8px">
+                Move an ongoing weekly class to a new day, time or instructor (e.g. Fridays → Saturdays 3:00–4:00 PM).
+                Use <strong>Change day/time…</strong> on a timetable row to prefill the current pattern. Preview checks
+                instructor availability, overlapping intervals and travel time before anything is saved;
+                completed classes and history are never changed.</p>
+            ${(data.schedules || []).length ? `<div style="font-size:0.82rem;margin-bottom:8px" id="scCurrent">Current pattern: ${(data.schedules || []).map(sc =>
+                `${dayLabel(sc.day_of_week)}s ${(sc.start_time || '').slice(0,5)}–${(sc.end_time || '').slice(0,5)}${sc.instructor_name ? ' with ' + escapeHtml(sc.instructor_name) : ''}`).join(' · ')}</div>` : ''}
             <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
                 <label>New day
-                    <select id="scDay" style="margin-left:6px" onchange="Admin.wsScInvalidate()">
+                    <select id="scDay" style="margin-left:6px" onchange="Admin.wsScDayChanged()">
                         ${['monday','tuesday','wednesday','thursday','friday','saturday','sunday'].map(d => `<option value="${d}" ${d === 'saturday' ? 'selected' : ''}>${d.charAt(0).toUpperCase()+d.slice(1)}</option>`).join('')}
                     </select></label>
-                <label>Start <input type="time" id="scStart" value="16:30" onchange="Admin.wsScInvalidate()" style="margin-left:4px"></label>
-                <label>End <input type="time" id="scEnd" value="17:30" onchange="Admin.wsScInvalidate()" style="margin-left:4px"></label>
-                <label>Effective from <input type="date" id="scEff" onchange="Admin.wsScInvalidate()" style="margin-left:4px"></label>
-                <label>Reason <input id="scNote" placeholder="e.g. school-holiday timing" style="margin-left:4px;width:180px"></label>
+                <label>Start <input type="time" id="scStart" value="15:00" onchange="Admin.wsScInvalidate()" style="margin-left:4px"></label>
+                <label>End <input type="time" id="scEnd" value="16:00" onchange="Admin.wsScInvalidate()" style="margin-left:4px"></label>
+                <label>Instructor
+                    <select id="scInstructor" onchange="Admin.wsScInvalidate()" style="margin-left:6px">
+                        ${(instructors || []).map(i => `<option value="${i.id}" data-name="${escapeHtml(i.full_name || '')}">${escapeHtml(i.full_name || i.login_id || i.id)}</option>`).join('')}
+                    </select></label>
+                <label>Effective from <input type="date" id="scEff" onchange="Admin.wsScInvalidate()" oninput="Admin.wsScEffTouched()" style="margin-left:4px"></label>
+                <label>Reason <input id="scNote" placeholder="e.g. permanent day change" style="margin-left:4px;width:170px"></label>
                 <button class="btn btn--secondary btn--sm" onclick="Admin.wsScPreview()">Preview changes</button>
                 <button class="btn btn--primary btn--sm" id="scApplyBtn" disabled onclick="Admin.wsScApply()">Confirm &amp; apply</button>
             </div>
@@ -4894,13 +4903,56 @@ const Admin = (function() {
     // Recurring schedule change (availability + travel preview)
     // ========================================
     function wsScFields() {
+        const instSel = document.getElementById('scInstructor');
         return {
             day: (document.getElementById('scDay') || {}).value || 'saturday',
             start_time: (document.getElementById('scStart') || {}).value || '',
             end_time: (document.getElementById('scEnd') || {}).value || '',
+            instructor_id: instSel && instSel.value ? instSel.value : undefined,
             effective_date: (document.getElementById('scEff') || {}).value || '',
             reason: ((document.getElementById('scNote') || {}).value || '').trim(),
         };
+    }
+
+    // Next occurrence of the selected weekday from tomorrow (effective-date default)
+    function wsScDefaultEff() {
+        const dayEl = document.getElementById('scDay');
+        const effEl = document.getElementById('scEff');
+        if (!dayEl || !effEl || studentWs.scEffTouched) return;
+        const order = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+        const want = order.indexOf(dayEl.value);
+        const d = new Date();
+        d.setDate(d.getDate() + 1);
+        for (let i = 0; i < 7 && d.getDay() !== ((want + 1) % 7); i++) d.setDate(d.getDate() + 1);
+        effEl.value = d.toISOString().slice(0, 10);
+    }
+
+    function wsScEffTouched() { studentWs.scEffTouched = true; }
+
+    function wsScDayChanged() {
+        studentWs.scEffTouched = false;
+        wsScDefaultEff();
+        wsScInvalidate();
+    }
+
+    // Prefill the editor from an existing weekly timetable row
+    function wsScPrefill(day, start, end, instructorName) {
+        const dayEl = document.getElementById('scDay');
+        if (!dayEl) { showToast('Open the Classes & Rescheduling tab first', 'error'); return; }
+        dayEl.value = day || 'saturday';
+        const st = document.getElementById('scStart'); if (st) st.value = start || '';
+        const en = document.getElementById('scEnd'); if (en) en.value = end || '';
+        const instSel = document.getElementById('scInstructor');
+        if (instSel && instructorName) {
+            const opt = Array.from(instSel.options).find(o =>
+                (o.dataset.name || o.textContent || '').trim() === instructorName.trim());
+            if (opt) instSel.value = opt.value;
+        }
+        studentWs.scEffTouched = false;
+        wsScDefaultEff();
+        wsScInvalidate();
+        dayEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        dayEl.focus();
     }
 
     function wsScInvalidate() {
@@ -4944,7 +4996,8 @@ const Admin = (function() {
         area.innerHTML = `
             ${conflictBox}
             ${warns}
-            <table class="admin-table" style="margin-bottom:8px"><thead><tr><th>Proposed pattern (from ${escapeHtml(data.effective_date || '')})</th><th>Availability</th></tr></thead><tbody>${props}</tbody></table>
+            <div style="font-size:0.82rem;margin-bottom:6px">Proposed pattern from <strong>${escapeHtml(data.effective_date || '')}</strong>${data.instructor_name ? ` · Instructor: <strong>${escapeHtml(data.instructor_name)}</strong>` : ''}</div>
+            <table class="admin-table" style="margin-bottom:8px"><thead><tr><th>New day &amp; time</th><th>Availability</th></tr></thead><tbody>${props}</tbody></table>
             ${(data.affected_sessions && data.affected_sessions.length) ? `
                 <div style="font-size:0.8rem;font-weight:600;margin:6px 0">Future classes that will change (${data.affected_sessions.length}):</div>
                 <table class="admin-table"><thead><tr><th>Current</th><th>New slot</th><th>Check</th></tr></thead><tbody>${aff}</tbody></table>`
@@ -6409,6 +6462,9 @@ const Admin = (function() {
         wsScPreview() { wsScPreview(); },
         wsScApply() { wsScApply(); },
         wsScInvalidate() { wsScInvalidate(); },
+        wsScPrefill(d, s, e, i) { wsScPrefill(d, s, e, i); },
+        wsScDayChanged() { wsScDayChanged(); },
+        wsScEffTouched() { wsScEffTouched(); },
         wsChangeMonth(v) { wsChangeMonth(v); },
         wsMonthlyReload() { wsMonthlyReload(); },
         wsAddSlot() { wsAddSlot(); },
