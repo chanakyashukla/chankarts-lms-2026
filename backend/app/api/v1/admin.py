@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, update, or_
@@ -21,6 +21,7 @@ from app.models.instructor import Instructor
 from app.core.roles import UserRole
 from app.core.security import get_password_hash
 from app.api.deps import require_role
+from app.services.access import get_instructor_for_user
 from app.models.class_schedule import ClassSchedule
 from app.services.ids import CMAIdService
 from app.services.audit import record_audit
@@ -32,6 +33,7 @@ import uuid
 from datetime import time as dtime
 from app.models.pin_reset import PinResetRequest, PinResetRequestStatus
 from app.models.session import ClassSession, SessionStatus, SessionStatusHistory
+from app.models.instructor_payout import InstructorRateRule, InstructorPayout, InstructorMonthReview
 from app.models.learning import Assignment
 from app.models.user import User as _UserForType
 
@@ -554,6 +556,12 @@ async def list_instructors(
             "experience_years": i.experience_years,
             "is_active": i.is_active,
             "travel_buffer_minutes": i.travel_buffer_minutes,
+            "employment_type": i.employment_type,
+            "compensation_mode": i.compensation_mode or "per_completed_class",
+            "per_class_rate_paise": i.per_class_rate_paise,
+            "rate_effective_date": i.rate_effective_date.isoformat() if i.rate_effective_date else None,
+            "contract_notes": i.contract_notes,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
         }
         for i, u in rows
     ]
@@ -849,6 +857,123 @@ async def list_weekly_schedules(
 
 
 # ========================================
+# Fixed weekly timetable slot deletion
+# ========================================
+async def _slot_future_matches(db: AsyncSession, sch: ClassSchedule, *, statuses) -> list[ClassSession]:
+    """Dated sessions belonging exclusively to this weekly pattern:
+    same enrolment + same weekday + same start time (+ same instructor when
+    the slot has one)."""
+    dow = (_WEEKDAYS.index(sch.day_of_week) + 1) % 7   # python Mon=0 → EXTRACT(DOW) Sun=0
+    q = select(ClassSession).where(
+        ClassSession.enrollment_id == sch.enrollment_id,
+        func.extract("dow", ClassSession.scheduled_date) == dow,
+        ClassSession.scheduled_start == sch.start_time,
+        ClassSession.status.in_(list(statuses)),
+    )
+    if sch.instructor_id:
+        q = q.where(ClassSession.instructor_id == sch.instructor_id)
+    rows = (await db.execute(q)).scalars().all()
+    if statuses and "scheduled" in statuses:
+        rows = [r for r in rows if r.scheduled_date >= date.today()]
+    return rows
+
+
+@router.get("/schedules/{schedule_id}/delete-impact")
+async def schedule_slot_delete_impact(
+    schedule_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """What deleting this timetable slot would affect (read-only)."""
+    sch = (await db.execute(select(ClassSchedule).where(ClassSchedule.id == schedule_id))).scalar_one_or_none()
+    if not sch:
+        raise HTTPException(status_code=404, detail="Timetable slot not found")
+    enr = (await db.execute(select(Enrollment).where(Enrollment.id == sch.enrollment_id))).scalar_one_or_none()
+    stu = (await db.execute(select(Student).where(Student.id == enr.student_id))).scalar_one_or_none() if enr else None
+    instr = (await db.execute(select(Instructor).where(Instructor.id == sch.instructor_id))).scalar_one_or_none()         if sch.instructor_id else None
+
+    future = await _slot_future_matches(db, sch, statuses=("scheduled",))
+    pending = await _slot_future_matches(db, sch, statuses=("rescheduling_required",))
+    completed = await _slot_future_matches(db, sch, statuses=("completed", "rescheduled", "cancelled"))
+    expected = _expected_classes(enr.fee_plan) if enr else None
+    return {
+        "schedule": {
+            "id": str(sch.id),
+            "day_of_week": sch.day_of_week,
+            "start_time": sch.start_time.isoformat() if sch.start_time else None,
+            "end_time": sch.end_time.isoformat() if sch.end_time else None,
+            "is_active": bool(sch.is_active),
+            "instrument": enr.programme_name if enr else None,
+            "instructor_name": f"{instr.first_name} {instr.last_name}" if instr else None,
+            "instructor_active": bool(instr.is_active) if instr else None,
+            "student": {"id": str(stu.id) if stu else None,
+                        "full_name": stu.full_name if stu else None,
+                        "cma_registration_id": stu.cma_registration_id if stu else None},
+        },
+        "future_sessions": [
+            {"id": str(x.id), "date": x.scheduled_date.isoformat(),
+             "start": x.scheduled_start.strftime("%H:%M"), "end": x.scheduled_end.strftime("%H:%M"),
+             "status": x.status}
+            for x in sorted(future, key=lambda z: z.scheduled_date)],
+        "rescheduling_pending_count": len(pending),
+        "historical_count": len(completed),
+        "monthly_classes_expected": expected,
+        "warning": "Deleting removes only this recurring row. Future scheduled classes that match "
+                   "this slot can be cancelled with it (optional). Completed classes, attendance and "
+                   "history are never touched.",
+    }
+
+
+@router.delete("/schedules/{schedule_id}")
+async def delete_schedule_slot(
+    schedule_id: UUID,
+    cancel_future: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Delete ONE recurring timetable slot.
+
+    Only the selected row is removed. Eligible future sessions that belong
+    exclusively to this pattern (same enrolment/weekday/start, status
+    scheduled) are cancelled only when cancel_future=true — completed classes,
+    attendance, pending reschedules and every other slot are preserved.
+    """
+    sch = (await db.execute(select(ClassSchedule).where(ClassSchedule.id == schedule_id))).scalar_one_or_none()
+    if not sch:
+        raise HTTPException(status_code=404, detail="Timetable slot not found")
+    enr = (await db.execute(select(Enrollment).where(Enrollment.id == sch.enrollment_id))).scalar_one_or_none()
+    stu = (await db.execute(select(Student).where(Student.id == enr.student_id))).scalar_one_or_none() if enr else None
+
+    future = await _slot_future_matches(db, sch, statuses=("scheduled",))
+    pending_kept = await _slot_future_matches(db, sch, statuses=("rescheduling_required",))
+    cancelled = 0
+    if cancel_future:
+        for sess in future:
+            sess.status = SessionStatus.CANCELLED
+            db.add(sess)
+            cancelled += 1
+
+    await db.delete(sch)
+    await db.flush()
+
+    pattern = f"{sch.day_of_week} {sch.start_time.strftime('%H:%M')}-{sch.end_time.strftime('%H:%M')}"
+    await record_audit(
+        db, action="schedule.slot_deleted", entity_type="class_schedule",
+        entity_id=str(schedule_id),
+        actor_user_id=current_user.id, actor_role=current_user.role.value,
+        summary=f"Deleted timetable slot {pattern} for {stu.full_name if stu else '?'} "
+                f"({enr.programme_name if enr else '-'}, instructor "
+                f"{'set' if sch.instructor_id else 'unassigned'})"
+                + (f"; cancelled {cancelled} future class(es)" if cancelled else "")
+                + (f"; kept {len(pending_kept)} pending reschedule(s)" if pending_kept else ""),
+    )
+    return {"deleted": True, "id": str(schedule_id),
+            "cancelled_future": cancelled,
+            "kept_future": len(future) - cancelled,
+            "rescheduling_pending_kept": len(pending_kept)}
+
+
+# ========================================
 # Student PIN reset (administrator)
 # ========================================
 @router.post("/students/{student_id}/reset-pin")
@@ -1085,6 +1210,11 @@ class AdminStudentUpdate(BaseModel):
 
 
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{3,100}$")
+_EMPLOYMENT_TYPES = {"intern", "part_time", "regular", "contract"}
+_EMPLOYMENT_LABELS = {"intern": "Intern", "part_time": "Part-time",
+                      "regular": "Regular employee", "contract": "Contract / session"}
+_CATEGORY_OF = {"intern": "intern", "part_time": "part_time",
+                "regular": "regular", "contract": "contract"}
 _ALLOWED_STUDENT_STATUS = {"active", "suspended", "archived"}
 _ALLOWED_FEE_PLANS = {"4_classes", "8_classes", "per_class"}
 
@@ -2394,6 +2524,11 @@ class AdminInstructorUpdate(BaseModel):
     bio: Optional[str] = None
     is_active: Optional[bool] = None
     travel_buffer_minutes: Optional[int] = None   # 0..600; null clears (travel unknown)
+    employment_type: Optional[str] = None         # intern|part_time|regular|contract ("" clears)
+    compensation_mode: Optional[str] = None       # per_completed_class only (for now)
+    per_class_rate_paise: Optional[int] = None    # -1 clears the individual rate
+    rate_effective_date: Optional[str] = None     # YYYY-MM-DD
+    contract_notes: Optional[str] = None
     acknowledge_future_classes: Optional[bool] = False
 
 
@@ -2560,6 +2695,40 @@ async def admin_update_instructor(
             raise HTTPException(status_code=400,
                                 detail="Travel buffer must be between 0 and 600 minutes")
         instructor.travel_buffer_minutes = body.travel_buffer_minutes
+    # ---- employment / compensation (never touches credentials or assignments) ----
+    if body.employment_type is not None:
+        et = body.employment_type.strip().lower()
+        if et and et not in _EMPLOYMENT_TYPES:
+            raise HTTPException(status_code=400,
+                                detail=f"employment_type must be one of: {', '.join(sorted(_EMPLOYMENT_TYPES))}")
+        instructor.employment_type = et or None
+    if body.compensation_mode is not None:
+        if body.compensation_mode != "per_completed_class":
+            raise HTTPException(status_code=400,
+                                detail="compensation_mode must be per_completed_class (other modes come later)")
+        instructor.compensation_mode = "per_completed_class"
+    if body.per_class_rate_paise is not None:
+        if body.per_class_rate_paise == -1:      # explicit clear → fall back to category default
+            instructor.per_class_rate_paise = None
+            instructor.rate_effective_date = None
+        else:
+            if body.per_class_rate_paise <= 0 or body.per_class_rate_paise > 10_000_000:
+                raise HTTPException(status_code=400, detail="Rate must be between 1 paise and ₹10,00,000")
+            instructor.per_class_rate_paise = body.per_class_rate_paise
+            if body.rate_effective_date:
+                try:
+                    instructor.rate_effective_date = date.fromisoformat(body.rate_effective_date)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="rate_effective_date must be YYYY-MM-DD")
+            elif instructor.rate_effective_date is None:
+                instructor.rate_effective_date = date.today()
+    if body.rate_effective_date is not None and body.per_class_rate_paise is None:
+        try:
+            instructor.rate_effective_date = date.fromisoformat(body.rate_effective_date) if body.rate_effective_date else None
+        except ValueError:
+            raise HTTPException(status_code=400, detail="rate_effective_date must be YYYY-MM-DD")
+    if body.contract_notes is not None:
+        instructor.contract_notes = body.contract_notes.strip() or None
     if body.is_active is not None:
         instructor.is_active = body.is_active
         if user:
@@ -2590,48 +2759,239 @@ async def admin_update_instructor(
             "phone": i.phone, "email": (u2.email if u2 else None)}
 
 
-@router.delete("/instructors/{instructor_id}")
-async def admin_delete_instructor(
+async def _release_user_references(db: AsyncSession, user_id: UUID) -> int:
+    """Null-out (never delete) nullable user-reference rows that would block
+    the account deletion — historical records keep their content, only the
+    'created/recorded by' attribution is cleared (no fabricated identity)."""
+    cols = [
+        ("audit_events", "actor_user_id"), ("payments", "recorded_by"),
+        ("payments", "payer_user_id"), ("assignment_files", "owner_user_id"),
+        ("class_sessions", "created_by"), ("class_sessions", "updated_by"),
+        ("session_status_history", "changed_by"), ("assignments", "created_by"),
+        ("achievements", "created_by"), ("monthly_reports", "created_by"),
+        ("syllabi", "created_by"), ("material_assignments", "assigned_by"),
+        ("student_remarks", "author_user_id"), ("resource_recommendations", "created_by"),
+        ("resource_visibility_targets", "created_by"), ("study_materials", "created_by"),
+        ("support_replies", "author_user_id"), ("support_requests", "resolved_by"),
+        ("exams", "created_by"), ("exam_fees", "created_by"), ("milestones", "created_by"),
+        ("invoices", "created_by"), ("payment_allocations", "allocated_by"),
+        ("receipts", "issued_by"), ("credit_ledger", "created_by"),
+    ]
+    n = 0
+    for tname, cname in cols:
+        t = Base.metadata.tables.get(tname)
+        if t is None or cname not in t.c:
+            continue
+        res = await db.execute(t.update().where(t.c[cname] == user_id).values(**{cname: None}))
+        n += int(res.rowcount or 0)
+    for tname, key in (("support_requests", "sender_user_id"), ("notifications", "user_id"),
+                       ("pin_reset_requests", "user_id"), ("email_verification_tokens", "user_id")):
+        t = Base.metadata.tables.get(tname)
+        if t is None or key not in t.c:
+            continue
+        res = await db.execute(t.delete().where(t.c[key] == user_id))
+        n += int(res.rowcount or 0)
+    return n
+
+
+@router.get("/instructors/{instructor_id}/delete-impact")
+async def instructor_delete_impact(
     instructor_id: UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
 ):
-    """Remove an instructor only when NO history exists; otherwise deactivate."""
+    """Everything a permanent instructor deletion would touch (read-only)."""
     instructor = (await db.execute(
         select(Instructor).where(Instructor.id == instructor_id))).scalar_one_or_none()
     if not instructor:
         raise HTTPException(status_code=404, detail="Instructor not found")
+    user = (await db.execute(select(User).where(User.id == instructor.user_id))).scalar_one_or_none()
 
-    history = {}
-    history["enrollments"] = (await db.execute(
-        select(func.count(Enrollment.id)).where(Enrollment.instructor_id == instructor.id))).scalar_one()
-    history["sessions"] = (await db.execute(
-        select(func.count(ClassSession.id)).where(ClassSession.instructor_id == instructor.id))).scalar_one()
-    history["schedules"] = (await db.execute(
-        select(func.count(ClassSchedule.id)).where(ClassSchedule.instructor_id == instructor.id))).scalar_one()
-    if any(history.values()):
-        raise HTTPException(
-            status_code=409,
-            detail="This instructor has teaching history — deactivate instead of deleting "
-                   "(PATCH is_active=false); all history is preserved",
-        )
+    enr_rows = (await db.execute(
+        select(Enrollment, Student).join(Student, Student.id == Enrollment.student_id)
+        .where(Enrollment.instructor_id == instructor.id))).all()
+    weekly = (await db.execute(
+        select(func.count(ClassSchedule.id)).where(ClassSchedule.instructor_id == instructor.id))).scalar()
+    future = (await db.execute(
+        select(ClassSession).where(ClassSession.instructor_id == instructor.id,
+                                   ClassSession.status.in_(("scheduled", "rescheduling_required")))
+        .order_by(ClassSession.scheduled_date))).scalars().all()
+    completed = (await db.execute(
+        select(func.count(ClassSession.id)).where(
+            ClassSession.instructor_id == instructor.id,
+            ClassSession.status == "completed"))).scalar()
+    attendance_n = (await db.execute(
+        select(func.count(Attendance.id)).where(Attendance.instructor_id == instructor.id))).scalar()
+    reports_n = (await db.execute(
+        select(func.count()).select_from(Base.metadata.tables["monthly_reports"]).where(
+            Base.metadata.tables["monthly_reports"].c.instructor_id == instructor.id))).scalar()         if "monthly_reports" in Base.metadata.tables else 0
+    payouts = (await db.execute(
+        select(func.count(InstructorPayout.id)).where(InstructorPayout.instructor_id == instructor.id))).scalar()
+    payout_sum = (await db.execute(
+        select(func.coalesce(func.sum(InstructorPayout.amount_paise), 0)).where(
+            InstructorPayout.instructor_id == instructor.id,
+            InstructorPayout.status == "recorded"))).scalar()
+    created = {}
+    if user is not None:
+        for tname in ("assignments", "syllabi", "study_materials", "achievements"):
+            t = Base.metadata.tables.get(tname)
+            if t is None or "created_by" not in t.c:
+                continue
+            created[tname] = (await db.execute(
+                select(func.count()).select_from(t).where(t.c.created_by == user.id))).scalar()
+    return {
+        "instructor": {"id": str(instructor.id), "name": f"{instructor.first_name} {instructor.last_name}",
+                       "is_active": bool(instructor.is_active),
+                       "login_id": user.username if user else None,
+                       "employment_type": instructor.employment_type},
+        "students": [{"id": str(st.id), "name": st.full_name,
+                      "cma_registration_id": st.cma_registration_id,
+                      "programme": enr.programme_name, "enrollment_id": str(enr.id)}
+                     for enr, st in enr_rows],
+        "weekly_slots": int(weekly or 0),
+        "future_sessions": [{"id": str(x.id), "date": x.scheduled_date.isoformat(),
+                             "start": x.scheduled_start.strftime("%H:%M"),
+                             "status": x.status} for x in future],
+        "completed_sessions": int(completed or 0),
+        "attendance_rows": int(attendance_n or 0),
+        "monthly_report_rows": int(reports_n or 0),
+        "payout_rows_retained": int(payouts or 0),
+        "payout_recorded_paise": int(payout_sum or 0),
+        "records_created_by": created,
+        "warnings": [
+            "Completed classes, attendance and payout history are preserved (instructor attribution cleared, never fabricated).",
+            "Future scheduled classes must be resolved: reassign, cancel, or leave unassigned.",
+            "Deactivation is recommended instead if this instructor may return — deletion is permanent.",
+        ],
+    }
 
-    user_id = instructor.user_id
+
+@router.delete("/instructors/{instructor_id}")
+async def admin_delete_instructor(
+    instructor_id: UUID,
+    future_action: str = Query("unassign", pattern="^(reassign|cancel|unassign)$"),
+    reassign_instructor_id: Optional[UUID] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Permanent instructor deletion with explicit dependency resolution.
+
+    - future_action=reassign : future classes, enrolments and weekly slots
+      move to reassign_instructor_id
+    - future_action=cancel   : future scheduled classes are cancelled (rows
+      kept), enrolments/slots left unassigned
+    - future_action=unassign (default): future classes kept, instructor
+      reference cleared (non-destructive)
+    Completed sessions/attendance/payouts are preserved; the login account is
+    removed so the instructor can no longer sign in or be assigned.
+    Never silently converts to deactivation.
+    """
+    instructor = (await db.execute(
+        select(Instructor).where(Instructor.id == instructor_id))).scalar_one_or_none()
+    if not instructor:
+        raise HTTPException(status_code=404, detail="Instructor not found")
+    user = (await db.execute(select(User).where(User.id == instructor.user_id))).scalar_one_or_none()
+
+    target = None
+    if future_action == "reassign":
+        if not reassign_instructor_id:
+            raise HTTPException(status_code=400, detail="reassign_instructor_id is required for reassign")
+        if reassign_instructor_id == instructor.id:
+            raise HTTPException(status_code=400, detail="Cannot reassign to the same instructor")
+        target = (await db.execute(
+            select(Instructor).where(Instructor.id == reassign_instructor_id))).scalar_one_or_none()
+        if not target or not target.is_active:
+            raise HTTPException(status_code=400, detail="Reassign target must be an existing active instructor")
+
+    # ---- resolve dependencies (single transaction) ----
+    counts = {"future_sessions": 0, "history_unassigned": 0, "enrollments": 0,
+              "weekly_slots": 0, "attendance": 0, "progress": 0, "reports": 0}
+    future = (await db.execute(
+        select(ClassSession).where(ClassSession.instructor_id == instructor.id,
+                                   ClassSession.status.in_(("scheduled", "rescheduling_required"))))).scalars().all()
+    for sess in future:
+        if future_action == "reassign":
+            sess.instructor = target
+            sess.instructor_id = target.id
+        elif future_action == "cancel":
+            sess.status = SessionStatus.CANCELLED
+            sess.instructor = None
+            sess.instructor_id = None
+        else:
+            sess.instructor = None
+            sess.instructor_id = None
+        db.add(sess)
+        counts["future_sessions"] += 1
+
+    history = (await db.execute(
+        select(ClassSession).where(ClassSession.instructor_id == instructor.id,
+                                   ClassSession.status.notin_(("scheduled", "rescheduling_required")))
+    )).scalars().all()
+    for sess in history:                      # completed/cancelled/rescheduled history kept
+        sess.instructor_id = None
+        db.add(sess)
+        counts["history_unassigned"] += 1
+
+    enrs = (await db.execute(
+        select(Enrollment).where(Enrollment.instructor_id == instructor.id))).scalars().all()
+    for e in enrs:
+        # relationship-aware assignment: prevents the ORM parent-delete pass
+        # from nullifying a fresh reassignment at flush
+        e.instructor = target if future_action == "reassign" else None
+        e.instructor_id = (target.id if (future_action == "reassign" and target) else None)
+        db.add(e)
+        counts["enrollments"] += 1
+
+    slots = (await db.execute(
+        select(ClassSchedule).where(ClassSchedule.instructor_id == instructor.id))).scalars().all()
+    for w in slots:
+        w.instructor = target if future_action == "reassign" else None
+        w.instructor_id = (target.id if (future_action == "reassign" and target) else None)
+        db.add(w)
+        counts["weekly_slots"] += 1
+
+    for tname, key, counter in (("attendance", "instructor_id", "attendance"),
+                                ("progress", "instructor_id", "progress"),
+                                ("monthly_reports", "instructor_id", "reports")):
+        t = Base.metadata.tables.get(tname)
+        if t is None or key not in t.c:
+            continue
+        res = await db.execute(t.update().where(t.c[key] == instructor.id).values(**{key: None}))
+        counts[counter] = int(res.rowcount or 0)
+    ssa_t = Base.metadata.tables.get("student_syllabus_assignments")
+    if ssa_t is not None and "instructor_id" in ssa_t.c:
+        await db.execute(ssa_t.update().where(ssa_t.c.instructor_id == instructor.id)
+                         .values(instructor_id=None))
+
+    user_refs = 0
+    if user:
+        user_refs = await _release_user_references(db, user.id)
+
     await db.delete(instructor)
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if user:
         await db.delete(user)
-    await db.flush()
+    try:
+        await db.flush()
+    except (IntegrityError, DBAPIError) as e:
+        await db.rollback()
+        raise HTTPException(status_code=409,
+                            detail=f"Deletion rolled back — unresolvable dependency: {str(getattr(e, 'orig', e))[:250]}")
+
     await record_audit(
-        db,
-        action="instructor.deleted",
-        entity_type="instructor",
-        entity_id=str(instructor_id),
-        actor_user_id=current_user.id,
-        actor_role=current_user.role.value,
-        summary=f"Deleted instructor {instructor.first_name} {instructor.last_name} (no historical records)",
+        db, action="instructor.deleted", entity_type="instructor", entity_id=str(instructor_id),
+        actor_user_id=current_user.id, actor_role=current_user.role.value,
+        summary=(f"Permanently deleted instructor {instructor.first_name} {instructor.last_name} "
+                 f"({future_action}): future={counts['future_sessions']} "
+                 f"history_unassigned={counts['history_unassigned']} enrollments={counts['enrollments']} "
+                 f"weekly={counts['weekly_slots']} attendance={counts['attendance']}; "
+                 f"completed classes and payouts preserved"),
     )
-    return {"deleted": True, "id": str(instructor_id)}
+    return {"deleted": True, "id": str(instructor_id),
+            "future_action": future_action,
+            "reassigned_to": str(target.id) if target else None,
+            "resolved": counts,
+            "user_references_released": user_refs,
+            "released_username": user.username if user else None}
 
 
 # ========================================
@@ -3206,3 +3566,556 @@ async def class_completion_report(
         "by_instructor": sorted(per_instructor.values(), key=lambda x: x["instructor_name"] or ""),
         "sessions": sessions,
     }
+
+
+# ========================================
+# Instructor employment, rates & monthly payouts
+# ========================================
+def _fmt_inr(paise: Optional[int]) -> str:
+    if paise is None:
+        return "—"
+    return f"₹{(paise / 100):,.2f}"
+
+
+async def _rate_for(db: AsyncSession, instructor, on_day: date) -> tuple[Optional[int], str]:
+    """Rate applicable on a date: individual agreed rate (with effective date)
+    wins over the category default. Returns (paise|None, source)."""
+    rules = (await db.execute(
+        select(InstructorRateRule)
+        .where(InstructorRateRule.instructor_id == instructor.id,
+               InstructorRateRule.effective_from <= on_day)
+        .order_by(InstructorRateRule.effective_from.desc()))).scalars().all()
+    if rules:
+        return rules[0].per_class_rate_paise, "individual"
+    if instructor.employment_type:
+        cats = (await db.execute(
+            select(InstructorRateRule)
+            .where(InstructorRateRule.instructor_id.is_(None),
+                   InstructorRateRule.category == instructor.employment_type,
+                   InstructorRateRule.effective_from <= on_day)
+            .order_by(InstructorRateRule.effective_from.desc()))).scalars().all()
+        if cats:
+            return cats[0].per_class_rate_paise, "category"
+    return None, "none"
+
+
+async def _month_completed_sessions(db: AsyncSession, instructor_id: UUID, month: str) -> list:
+    """Payable source of truth: completed teaching sessions attributed to this
+    instructor, assigned to the month via billing_month (set at completion)
+    falling back to the actual/scheduled date."""
+    rows = (await db.execute(
+        select(ClassSession).where(
+            ClassSession.instructor_id == instructor_id,
+            ClassSession.status == SessionStatus.COMPLETED)
+        .order_by(ClassSession.scheduled_date))).scalars().all()
+    out = []
+    for s in rows:
+        eff_month = s.billing_month
+        if not eff_month:
+            d = s.actual_date or s.scheduled_date
+            eff_month = f"{d.year:04d}-{d.month:02d}" if d else None
+        if eff_month == month:
+            out.append(s)
+    return out
+
+
+async def _instructor_month_calc(db: AsyncSession, instructor, month: str) -> dict:
+    sessions = await _month_completed_sessions(db, instructor.id, month)
+    session_rows, breakdown = [], {}
+    missing = []
+    total = 0
+    for s in sessions:
+        day = s.actual_date or s.scheduled_date
+        rate, source = (await _rate_for(db, instructor, day)) if day else (None, "none")
+        if rate is None:
+            missing.append(str(s.id))
+        else:
+            total += rate
+            key = str(rate)
+            breakdown.setdefault(key, {"rate_paise": rate, "count": 0, "subtotal_paise": 0})
+            breakdown[key]["count"] += 1
+            breakdown[key]["subtotal_paise"] += rate
+        session_rows.append({
+            "id": str(s.id),
+            "date": (s.actual_date or s.scheduled_date).isoformat() if day else None,
+            "start": s.scheduled_start.strftime("%H:%M") if s.scheduled_start else None,
+            "end": s.scheduled_end.strftime("%H:%M") if s.scheduled_end else None,
+            "rate_paise": rate,
+            "rate_source": source,
+            "counts": bool(s.counts_toward_package),
+        })
+
+    payouts = (await db.execute(
+        select(InstructorPayout).where(
+            InstructorPayout.instructor_id == instructor.id,
+            InstructorPayout.month == month)
+        .order_by(InstructorPayout.created_at))).scalars().all()
+    # paid = recorded payouts only. Adjustment rows are the reversal's paper
+    # trail: reversing excludes the original, so counting the negative
+    # adjustment too would subtract the same money twice.
+    paid = sum(p.amount_paise for p in payouts
+               if p.status == "recorded" and p.kind == "payout")
+    review = (await db.execute(
+        select(InstructorMonthReview).where(
+            InstructorMonthReview.instructor_id == instructor.id,
+            InstructorMonthReview.month == month))).scalar_one_or_none()
+
+    payable = None if missing else total
+    if missing:
+        status_ = "rate_not_configured"
+    elif payable == 0:
+        status_ = "calculated"
+    elif paid <= 0:
+        status_ = "reviewed" if review else "calculated"
+    elif paid < payable:
+        status_ = "partially_paid"
+    elif paid == payable:
+        status_ = "paid"
+    else:
+        status_ = "overpaid"
+
+    return {
+        "month": month,
+        "instructor": {"id": str(instructor.id),
+                       "name": f"{instructor.first_name} {instructor.last_name}",
+                       "employment_type": instructor.employment_type,
+                       "employment_label": _EMPLOYMENT_LABELS.get(instructor.employment_type or "", "—"),
+                       "compensation_mode": instructor.compensation_mode or "per_completed_class",
+                       "individual_rate_paise": instructor.per_class_rate_paise,
+                       "is_active": bool(instructor.is_active)},
+        "completed_count": len(sessions),
+        "rate_breakdown": list(breakdown.values()),
+        "payable_paise": payable,
+        "missing_rate_session_ids": missing,
+        "payouts": [{"id": str(p.id), "amount_paise": p.amount_paise, "kind": p.kind,
+                     "status": p.status,
+                     "paid_at": p.paid_at.isoformat() if p.paid_at else None,
+                     "method": p.method, "reference": p.reference, "notes": p.notes,
+                     "reversal_of": str(p.reversal_of) if p.reversal_of else None,
+                     "recorded_by": str(p.recorded_by) if p.recorded_by else None,
+                     "created_at": p.created_at.isoformat() if p.created_at else None}
+                    for p in payouts],
+        "paid_paise": paid,
+        "outstanding_paise": (None if payable is None else payable - paid),
+        "status": status_,
+        "reviewed": ({"reviewed_at": review.reviewed_at.isoformat(),
+                      "payable_at_review": review.payable_at_review,
+                      "changed_since_review": bool(review and payable is not None
+                                                   and review.payable_at_review != payable)}
+                     if review else None),
+    }
+
+
+@router.get("/instructor-rates")
+async def list_instructor_rates(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Category default policies + individual agreed rates (append-only)."""
+    rules = (await db.execute(
+        select(InstructorRateRule).order_by(InstructorRateRule.effective_from.desc()))).scalars().all()
+    defaults, individuals = [], []
+    for r in rules:
+        item = {"id": str(r.id), "per_class_rate_paise": r.per_class_rate_paise,
+                "effective_from": r.effective_from.isoformat(), "notes": r.notes,
+                "created_at": r.created_at.isoformat()}
+        if r.instructor_id:
+            item["instructor_id"] = str(r.instructor_id)
+            individuals.append(item)
+        else:
+            item["category"] = r.category
+            defaults.append(item)
+    return {"defaults": defaults, "individuals": individuals,
+            "categories": [{"key": k, "label": _EMPLOYMENT_LABELS[k]} for k in sorted(_EMPLOYMENT_TYPES)]}
+
+
+@router.put("/instructor-rates")
+async def upsert_category_rate(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Define/update a category default rate (intern, part_time, …).
+    Never rewrites historical rules — a new effective_from row is appended."""
+    category = str(body.get("category", "")).strip().lower()
+    if category not in _EMPLOYMENT_TYPES:
+        raise HTTPException(status_code=400,
+                            detail=f"category must be one of: {', '.join(sorted(_EMPLOYMENT_TYPES))}")
+    try:
+        amount = int(body.get("per_class_rate_paise"))
+        eff = date.fromisoformat(str(body.get("effective_from")))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="per_class_rate_paise (int) and effective_from (YYYY-MM-DD) are required")
+    if amount <= 0 or amount > 10_000_000:
+        raise HTTPException(status_code=400, detail="Rate must be between 1 paise and ₹10,00,000")
+
+    existing = (await db.execute(
+        select(InstructorRateRule).where(
+            InstructorRateRule.instructor_id.is_(None),
+            InstructorRateRule.category == category,
+            InstructorRateRule.effective_from == eff))).scalar_one_or_none()
+    if existing:
+        existing.per_class_rate_paise = amount
+        existing.notes = (body.get("notes") or existing.notes)
+        existing.created_by = current_user.id
+        db.add(existing)
+        rule = existing
+        action = "updated"
+    else:
+        rule = InstructorRateRule(instructor_id=None, category=category,
+                                  per_class_rate_paise=amount, effective_from=eff,
+                                  notes=body.get("notes"), created_by=current_user.id)
+        db.add(rule)
+        action = "created"
+    await db.flush()
+    await record_audit(db, action="instructor.rate_policy", entity_type="rate_policy",
+                       entity_id=category, actor_user_id=current_user.id,
+                       actor_role=current_user.role.value,
+                       summary=f"Category default rate {action}: {category} = {_fmt_inr(amount)}/class from {eff.isoformat()}")
+    return {"ok": True, "action": action, "category": category,
+            "per_class_rate_paise": amount, "effective_from": eff.isoformat()}
+
+
+@router.post("/instructors/{instructor_id}/rate")
+async def set_individual_rate(
+    instructor_id: UUID,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Record an individual agreed rate with an effective date (append-only)."""
+    instructor = (await db.execute(
+        select(Instructor).where(Instructor.id == instructor_id))).scalar_one_or_none()
+    if not instructor:
+        raise HTTPException(status_code=404, detail="Instructor not found")
+    try:
+        amount = int(body.get("per_class_rate_paise"))
+        eff = date.fromisoformat(str(body.get("effective_from")))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="per_class_rate_paise (int) and effective_from (YYYY-MM-DD) are required")
+    if amount <= 0 or amount > 10_000_000:
+        raise HTTPException(status_code=400, detail="Rate must be between 1 paise and ₹10,00,000")
+    rule = InstructorRateRule(instructor_id=instructor.id, per_class_rate_paise=amount,
+                              effective_from=eff, notes=body.get("notes"), created_by=current_user.id)
+    db.add(rule)
+    # mirror the quick field on the profile for display (history stays in the rules table)
+    instructor.per_class_rate_paise = amount
+    instructor.rate_effective_date = eff
+    db.add(instructor)
+    await db.flush()
+    await record_audit(db, action="instructor.rate_set", entity_type="instructor",
+                       entity_id=str(instructor.id), actor_user_id=current_user.id,
+                       actor_role=current_user.role.value,
+                       summary=f"Individual rate for {instructor.first_name} {instructor.last_name}: "
+                               f"{_fmt_inr(amount)}/class effective {eff.isoformat()}")
+    return {"ok": True, "per_class_rate_paise": amount, "effective_from": eff.isoformat()}
+
+
+@router.get("/instructors/{instructor_id}/rate")
+async def get_instructor_rate(
+    instructor_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    instructor = (await db.execute(
+        select(Instructor).where(Instructor.id == instructor_id))).scalar_one_or_none()
+    if not instructor:
+        raise HTTPException(status_code=404, detail="Instructor not found")
+    today = date.today()
+    rate, source = await _rate_for(db, instructor, today)
+    history = (await db.execute(
+        select(InstructorRateRule).where(InstructorRateRule.instructor_id == instructor.id)
+        .order_by(InstructorRateRule.effective_from.desc()))).scalars().all()
+    return {"current": {"rate_paise": rate, "source": source, "as_of": today.isoformat()},
+            "individual_history": [
+                {"per_class_rate_paise": r.per_class_rate_paise,
+                 "effective_from": r.effective_from.isoformat(), "notes": r.notes}
+                for r in history],
+            "category": instructor.employment_type}
+
+
+@router.get("/instructors/{instructor_id}/payouts")
+async def instructor_payouts(
+    instructor_id: UUID,
+    month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    instructor = (await db.execute(
+        select(Instructor).where(Instructor.id == instructor_id))).scalar_one_or_none()
+    if not instructor:
+        raise HTTPException(status_code=404, detail="Instructor not found")
+    return await _instructor_month_calc(db, instructor, month)
+
+
+@router.get("/payouts/self")
+async def my_payouts(
+    month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.INSTRUCTOR])),
+):
+    """An instructor may only ever see their own payout calculation."""
+    instructor = await get_instructor_for_user(db, current_user)
+    if not instructor:
+        raise HTTPException(status_code=404, detail="Instructor profile not found")
+    return await _instructor_month_calc(db, instructor, month)
+
+
+@router.get("/payouts/summary")
+async def payouts_summary(
+    month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    instructors = (await db.execute(
+        select(Instructor).order_by(Instructor.first_name))).scalars().all()
+    rows = []
+    for i in instructors:
+        calc = await _instructor_month_calc(db, i, month)
+        rows.append({
+            "instructor_id": calc["instructor"]["id"],
+            "name": calc["instructor"]["name"],
+            "employment_label": calc["instructor"]["employment_label"],
+            "is_active": calc["instructor"]["is_active"],
+            "completed_count": calc["completed_count"],
+            "rate_breakdown": calc["rate_breakdown"],
+            "payable_paise": calc["payable_paise"],
+            "paid_paise": calc["paid_paise"],
+            "outstanding_paise": calc["outstanding_paise"],
+            "status": calc["status"],
+            "reviewed": calc["reviewed"],
+        })
+    return {"month": month, "rows": rows}
+
+
+@router.post("/instructors/{instructor_id}/payouts", status_code=status.HTTP_201_CREATED)
+async def record_instructor_payout(
+    instructor_id: UUID,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Record an ACTUAL money transfer to an instructor (never student fees).
+    Idempotent: an identical payout for the same month is refused."""
+    instructor = (await db.execute(
+        select(Instructor).where(Instructor.id == instructor_id))).scalar_one_or_none()
+    if not instructor:
+        raise HTTPException(status_code=404, detail="Instructor not found")
+    month = str(body.get("month", ""))
+    if not re.match(r"^\d{4}-\d{2}$", month):
+        raise HTTPException(status_code=400, detail="month must be YYYY-MM")
+    try:
+        amount = int(body.get("amount_paise"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="amount_paise (int) is required")
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="amount_paise must be positive")
+    method = str(body.get("method") or "").strip()
+    if len(method) < 2:
+        raise HTTPException(status_code=400, detail="method is required (e.g. upi, bank_transfer, cash)")
+    paid_at = date.today()
+    if body.get("paid_at"):
+        try:
+            paid_at = date.fromisoformat(str(body["paid_at"])[:10])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="paid_at must be YYYY-MM-DD")
+    reference = (str(body.get("reference")).strip() or None) if body.get("reference") else None
+    notes = (str(body.get("notes")).strip() or None) if body.get("notes") else None
+
+    # outstanding guard (traceable calculation)
+    calc = await _instructor_month_calc(db, instructor, month)
+    if calc["status"] == "rate_not_configured":
+        raise HTTPException(status_code=409,
+                            detail="Rate Not Configured — set a per-class rate before recording payouts for this month")
+    if calc["outstanding_paise"] is not None and amount > calc["outstanding_paise"]:
+        raise HTTPException(status_code=400,
+                            detail=f"Amount exceeds the outstanding payable ({_fmt_inr(calc['outstanding_paise'])})")
+
+    # duplicate protection (repeated clicks / retried requests)
+    q = select(InstructorPayout).where(
+        InstructorPayout.instructor_id == instructor.id,
+        InstructorPayout.month == month,
+        InstructorPayout.kind == "payout",
+        InstructorPayout.status == "recorded",
+        InstructorPayout.amount_paise == amount,
+        InstructorPayout.paid_at == paid_at,
+        InstructorPayout.method == method)
+    if reference:
+        q = q.where(InstructorPayout.reference == reference)
+    dup = (await db.execute(q)).scalars().first()
+    if dup:
+        raise HTTPException(status_code=409, detail="An identical payout is already recorded for this month")
+
+    payout = InstructorPayout(instructor_id=instructor.id, month=month, amount_paise=amount,
+                              kind="payout", status="recorded", paid_at=paid_at, method=method,
+                              reference=reference, notes=notes, recorded_by=current_user.id)
+    db.add(payout)
+    await db.flush()
+    calc = await _instructor_month_calc(db, instructor, month)   # include this payout
+    await record_audit(db, action="instructor.payout_recorded", entity_type="instructor_payout",
+                       entity_id=str(payout.id), actor_user_id=current_user.id,
+                       actor_role=current_user.role.value,
+                       summary=f"Payout recorded for {instructor.first_name} {instructor.last_name} "
+                               f"({month}): {_fmt_inr(amount)} via {method}"
+                               + (f" ref {reference}" if reference else ""))
+    return {"ok": True, "payout_id": str(payout.id), "month": month,
+            "amount_paise": amount, **{k: calc[k] for k in
+                                       ("payable_paise", "paid_paise", "outstanding_paise", "status")}}
+
+
+@router.post("/payouts/{payout_id}/reverse")
+async def reverse_instructor_payout(
+    payout_id: UUID,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Auditable correction: the original row is kept and marked reversed; a
+    linked negative adjustment records the difference."""
+    payout = (await db.execute(
+        select(InstructorPayout).where(InstructorPayout.id == payout_id))).scalar_one_or_none()
+    if not payout:
+        raise HTTPException(status_code=404, detail="Payout not found")
+    if payout.kind != "payout":
+        raise HTTPException(status_code=400, detail="Only recorded payouts can be reversed")
+    if payout.status == "reversed":
+        raise HTTPException(status_code=409, detail="This payout has already been reversed")
+    reason = (str(body.get("reason") or "").strip() or "Correction")
+    adj = InstructorPayout(instructor_id=payout.instructor_id, month=payout.month,
+                           amount_paise=-payout.amount_paise, kind="adjustment",
+                           status="recorded", paid_at=date.today(), method="adjustment",
+                           reference=f"REV-{(payout.reference or str(payout.id)[:8])}",
+                           notes=reason, reversal_of=payout.id, recorded_by=current_user.id)
+    payout.status = "reversed"
+    db.add(payout)
+    db.add(adj)
+    await db.flush()
+    await record_audit(db, action="instructor.payout_reversed", entity_type="instructor_payout",
+                       entity_id=str(payout.id), actor_user_id=current_user.id,
+                       actor_role=current_user.role.value,
+                       summary=f"Reversed payout {_fmt_inr(payout.amount_paise)} ({payout.month}): {reason}")
+    return {"ok": True, "original_status": "reversed", "adjustment_id": str(adj.id)}
+
+
+@router.post("/instructors/{instructor_id}/payout-review")
+async def review_instructor_payout(
+    instructor_id: UUID,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Administrator sign-off of a month's calculation (blocked while a rate
+    is missing — an unresolved rate can never be finalised)."""
+    instructor = (await db.execute(
+        select(Instructor).where(Instructor.id == instructor_id))).scalar_one_or_none()
+    if not instructor:
+        raise HTTPException(status_code=404, detail="Instructor not found")
+    month = str(body.get("month", ""))
+    if not re.match(r"^\d{4}-\d{2}$", month):
+        raise HTTPException(status_code=400, detail="month must be YYYY-MM")
+    calc = await _instructor_month_calc(db, instructor, month)
+    if calc["status"] == "rate_not_configured":
+        raise HTTPException(status_code=409,
+                            detail={"message": "Rate Not Configured — configure the per-class rate before reviewing",
+                                    "missing_session_ids": calc["missing_rate_session_ids"]})
+    review = (await db.execute(
+        select(InstructorMonthReview).where(
+            InstructorMonthReview.instructor_id == instructor.id,
+            InstructorMonthReview.month == month))).scalar_one_or_none()
+    if review:
+        review.payable_at_review = calc["payable_paise"] or 0
+        review.reviewed_by = current_user.id
+        review.reviewed_at = datetime.utcnow()
+    else:
+        review = InstructorMonthReview(instructor_id=instructor.id, month=month,
+                                       payable_at_review=calc["payable_paise"] or 0,
+                                       reviewed_by=current_user.id)
+    db.add(review)
+    await db.flush()
+    await record_audit(db, action="instructor.payout_reviewed", entity_type="instructor",
+                       entity_id=str(instructor.id), actor_user_id=current_user.id,
+                       actor_role=current_user.role.value,
+                       summary=f"Reviewed {month} payout for {instructor.first_name} {instructor.last_name}: "
+                               f"payable {_fmt_inr(calc['payable_paise'])} ({calc['completed_count']} classes)")
+    return {"ok": True, "month": month, "payable_paise": calc["payable_paise"],
+            "reviewed_at": review.reviewed_at.isoformat()}
+
+
+@router.get("/instructors/{instructor_id}/payouts/export")
+async def export_instructor_payout(
+    instructor_id: UUID,
+    month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Branded CSV: monthly teaching & payout statement for one instructor."""
+    instructor = (await db.execute(
+        select(Instructor).where(Instructor.id == instructor_id))).scalar_one_or_none()
+    if not instructor:
+        raise HTTPException(status_code=404, detail="Instructor not found")
+    calc = await _instructor_month_calc(db, instructor, month)
+    import csv as _csv
+    import io as _io
+    buf = _io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow(["CHANKARTS MUSIC ACADEMY"])
+    w.writerow(["Instructor Monthly Teaching & Payout Statement"])
+    w.writerow(["Instructor", calc["instructor"]["name"]])
+    w.writerow(["Employment / Engagement", calc["instructor"]["employment_label"]])
+    w.writerow(["Month", month])
+    w.writerow(["Generated", date.today().isoformat()])
+    w.writerow(["Currency", "INR (₹)"])
+    w.writerow([])
+    w.writerow(["Date", "Day", "Time", "Rate Applied (₹)", "Rate Source"])
+    sessions = await _month_completed_sessions(db, instructor.id, month)
+    for s in sessions:
+        day = s.actual_date or s.scheduled_date
+        rate, source = (await _rate_for(db, instructor, day)) if day else (None, "none")
+        w.writerow([(day.isoformat() if day else ""), (s.scheduled_start.strftime("%H:%M") if s.scheduled_start else ""),
+                     (s.scheduled_end.strftime("%H:%M") if s.scheduled_end else ""),
+                     (f"{rate/100:,.2f}" if rate is not None else "RATE NOT CONFIGURED"), source])
+    w.writerow([])
+    w.writerow(["Eligible completed classes", calc["completed_count"]])
+    w.writerow(["Gross payable", _fmt_inr(calc["payable_paise"]).replace("₹", "")])
+    for b in calc["rate_breakdown"]:
+        w.writerow([f"  {b['count']} class(es) @ {b['rate_paise']/100:,.2f}", "", "", f"{b['subtotal_paise']/100:,.2f}"])
+    for p in calc["payouts"]:
+        w.writerow(["Payout", p["paid_at"] or "", p["method"] or "",
+                     f"{p['amount_paise']/100:,.2f}", f"{p['kind']} / {p['status']}"
+                     + (f" / {p['reference']}" if p["reference"] else "")])
+    w.writerow(["Paid to date", "", "", f"{calc['paid_paise']/100:,.2f}"])
+    w.writerow(["Outstanding", "", "",
+                (f"{calc['outstanding_paise']/100:,.2f}" if calc["outstanding_paise"] is not None else "RATE NOT CONFIGURED")])
+    w.writerow(["Status", calc["status"].replace("_", " ").title()])
+    csv_text = "\ufeff" + buf.getvalue()
+    return Response(csv_text, media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition":
+                             f"attachment; filename=chankarts-payout-{month}.csv"})
+
+
+@router.post("/instructors/{instructor_id}/reset-pin")
+async def reset_instructor_pin(
+    instructor_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Administrator PIN reset — hash stored, temp PIN returned ONCE,
+    forced change on next login (same policy as students)."""
+    import secrets as _secrets
+    instructor = (await db.execute(
+        select(Instructor).where(Instructor.id == instructor_id))).scalar_one_or_none()
+    if not instructor:
+        raise HTTPException(status_code=404, detail="Instructor not found")
+    user = (await db.execute(select(User).where(User.id == instructor.user_id))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="Instructor user account not found")
+    new_pin = f"{_secrets.randbelow(10000):04d}"
+    user.hashed_password = get_password_hash(new_pin)
+    user.must_change_pin = True
+    db.add(user)
+    await db.flush()
+    await record_audit(db, action="instructor.pin_reset", entity_type="instructor",
+                       entity_id=str(instructor.id), actor_user_id=current_user.id,
+                       actor_role=current_user.role.value,
+                       summary=f"PIN reset for {instructor.first_name} {instructor.last_name} ({user.username})")
+    return {"temp_pin": new_pin, "username": user.username, "must_change_pin": True}

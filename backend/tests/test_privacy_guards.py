@@ -11,7 +11,7 @@ from datetime import date, time, timedelta
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///./test_privacy_guards.db"
@@ -249,11 +249,25 @@ async def test_archived_student_cannot_login(client, world):
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_instructor_delete_guard(client, world):
+    """Permanent deletion is allowed with history (dependency-aware); the
+    history itself must survive. Deactivation remains a separate path."""
     w = world
-    # instructor with teaching history must not be deletable
+    async with TestSessionLocal() as db:
+        sessions_before = (await db.execute(
+            select(func.count(ClassSession.id)))).scalar()
+
+    # instructor WITH teaching history can be permanently deleted (default: unassign)
     r = await client.delete(f"/api/v1/admin/instructors/{w['inst_a_id']}",
                             headers=auth(w["admin"]))
-    assert r.status_code == 409
+    assert r.status_code == 200 and r.json()["future_action"] == "unassign"
+
+    async with TestSessionLocal() as db:
+        # profile gone; history intact (no cascade destroyed sessions)
+        gone = (await db.execute(
+            select(Instructor).where(Instructor.id == w["inst_a_id"]))).scalar_one_or_none()
+        assert gone is None
+        sessions_after = (await db.execute(select(func.count(ClassSession.id)))).scalar()
+        assert sessions_after >= sessions_before
 
     # instructor with no history can be removed
     async with TestSessionLocal() as db:

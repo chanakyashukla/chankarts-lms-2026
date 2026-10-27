@@ -1523,32 +1523,57 @@ const Admin = (function() {
     // ========================================
     // Instructors
     // ========================================
+    let payoutSummaryMonth = new Date().toISOString().slice(0, 7);
+
     async function renderInstructors() {
         const container = document.getElementById('adminContent');
         container.innerHTML = '<div class="admin-loading"><div class="admin-loading__spinner"></div>Loading instructors...</div>';
 
         try {
-            const instructors = await apiCall('/instructors');
+            const [instructors, summary] = await Promise.all([
+                apiCall('/instructors'),
+                apiCall(`/payouts/summary?month=${payoutSummaryMonth}`).catch(() => null),
+            ]);
+            const rateBy = {};
+            ((summary && summary.rows) || []).forEach(r => { rateBy[r.instructor_id] = r; });
+            const empLabel = { intern: 'Intern', part_time: 'Part-time', regular: 'Regular', contract: 'Contract' };
+            const sumRows = ((summary && summary.rows) || []);
+            const totals = sumRows.reduce((acc, r) => {
+                if (r.payable_paise != null) acc.payable += r.payable_paise;
+                acc.paid += r.paid_paise || 0;
+                return acc;
+            }, { payable: 0, paid: 0 });
+            const statusBadge = (st, reviewed) => {
+                if (st === 'rate_not_configured') return '<span class="badge badge--pending">Rate Not Configured</span>';
+                if (st === 'paid') return '<span class="badge badge--approved">Paid</span>';
+                if (st === 'partially_paid') return '<span class="badge badge--pending">Partially Paid</span>';
+                if (st === 'reviewed') return '<span class="badge badge--approved">Reviewed</span>';
+                if (st === 'overpaid') return '<span class="badge badge--rejected">Overpaid</span>';
+                return `<span class="badge badge--pending">Calculated${reviewed ? ' · reviewed' : ''}</span>`;
+            };
             container.innerHTML = `
                 <div class="admin-header">
                     <div>
                         <h1 class="admin-header__title">Instructors</h1>
-                        <p class="admin-header__subtitle">Faculty directory and specialisations</p>
+                        <p class="admin-header__subtitle">Faculty directory, employment terms and monthly payouts</p>
                     </div>
                     <div class="admin-actions">
+                        <button class="btn btn--secondary" onclick="Admin.rateSettingsModal()">Rate settings</button>
                         <button class="btn btn--primary" onclick="Admin.createInstructorModal()">+ Add Instructor</button>
                     </div>
                 </div>
-                <div class="admin-card">
-                    <div class="admin-card__body" style="padding: 0;">
+                <div class="admin-card" style="margin-bottom:14px">
+                    <div class="admin-card__body" style="padding:0;">
                         ${instructors.length > 0 ? `
-                            <table class="admin-table">
+                            <div class="table-scroll-outer">
+                                <div class="table-scroll" tabindex="0" aria-label="Instructors table — scroll horizontally for all columns and actions">
+                                    <table class="admin-table">
                                 <thead>
                                     <tr>
                                         <th>Name</th>
                                         <th>Phone</th>
                                         <th>Specializations</th>
-                                        <th>Experience</th>
+                                        <th>Employment</th>
                                         <th>Status</th>
                                         <th></th>
                                     </tr>
@@ -1556,21 +1581,27 @@ const Admin = (function() {
                                 <tbody>
                                     ${instructors.map(i => `
                                         <tr>
-                                            <td><strong>${escapeHtml(i.full_name)}</strong></td>
+                                            <td><strong><a href="#" onclick="event.preventDefault();Admin.openInstructorProfile('${i.id}')" style="color:inherit">${escapeHtml(i.full_name)}</a></strong></td>
                                             <td>${escapeHtml(i.phone || '-')}</td>
                                             <td>${escapeHtml(i.specializations || '-')}</td>
-                                            <td>${i.experience_years ? escapeHtml(i.experience_years) + ' yrs' : '-'}</td>
+                                            <td>${escapeHtml(empLabel[i.employment_type] || '—')}</td>
                                             <td><span class="badge badge--${i.is_active ? 'active' : 'inactive'}">${i.is_active ? 'Active' : 'Inactive'}</span></td>
                                             <td style="white-space:nowrap;">
+                                                <button class="btn btn--primary btn--sm" onclick="Admin.openInstructorProfile('${i.id}')">Open Profile</button>
                                                 <button class="btn btn--secondary btn--sm" onclick="Admin.editInstructorModal('${i.id}')">Edit</button>
+                                                <button class="btn btn--secondary btn--sm" onclick="Admin.instructorResetPin('${i.id}')">Reset PIN</button>
                                                 ${i.is_active
                                                     ? `<button class="btn btn--secondary btn--sm" onclick="Admin.deactivateInstructor('${i.id}')">Deactivate</button>`
                                                     : `<button class="btn btn--secondary btn--sm" onclick="Admin.setInstructorActive('${i.id}',true)">Reactivate</button>`}
+                                                <button class="btn btn--secondary btn--sm" onclick="Admin.deleteInstructorPermanently('${i.id}')">Delete permanently</button>
                                             </td>
                                         </tr>
                                     `).join('')}
                                 </tbody>
-                            </table>
+                                    </table>
+                                </div>
+                                <div class="table-scroll-hint">Scroll sideways for all columns &amp; actions →</div>
+                            </div>
                         ` : `
                             <div class="admin-empty">
                                 <div class="admin-empty__icon"> ${icon("instructors")}</div>
@@ -1578,6 +1609,55 @@ const Admin = (function() {
                                 <div class="admin-empty__text">Faculty profiles will appear here</div>
                             </div>
                         `}
+                    </div>
+                </div>
+                <div class="admin-card" id="payoutSummaryCard" style="margin-bottom:14px">
+                    <div class="admin-card__body">
+                        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+                            <h3 class="admin-card__title">Monthly Teaching &amp; Payout</h3>
+                            <div style="display:flex;gap:8px;align-items:center">
+                                <input type="month" class="admin-filter" value="${payoutSummaryMonth}"
+                                       onchange="Admin.payoutsMonthChange(this.value)" style="width:150px">
+                                <span style="font-size:0.78rem;color:var(--color-text-muted)">Auto-calculated from completed classes</span>
+                            </div>
+                        </div>
+                        ${sumRows.length ? `
+                        <table class="admin-table" style="margin-top:10px">
+                            <thead><tr>
+                                <th>Instructor</th><th>Category</th><th>Completed</th><th>Rate</th>
+                                <th>Payable</th><th>Paid</th><th>Outstanding</th><th>Status</th><th></th>
+                            </tr></thead>
+                            <tbody>
+                            ${sumRows.map(r => `
+                                <tr>
+                                    <td><strong>${escapeHtml(r.name)}</strong>${r.is_active ? '' : ' <span class="badge badge--inactive">Inactive</span>'}</td>
+                                    <td>${escapeHtml(r.employment_label)}</td>
+                                    <td>${r.completed_count}</td>
+                                    <td>${r.rate_breakdown.length
+                                        ? r.rate_breakdown.map(b => `₹${(b.rate_paise / 100).toFixed(2)} × ${b.count}`).join('<br>')
+                                        : '<span style="color:var(--color-warning)">Not set</span>'}</td>
+                                    <td>${r.payable_paise == null ? '—' : '₹' + (r.payable_paise / 100).toFixed(2)}</td>
+                                    <td>₹${((r.paid_paise || 0) / 100).toFixed(2)}</td>
+                                    <td>${r.outstanding_paise == null ? '—' : '₹' + (r.outstanding_paise / 100).toFixed(2)}</td>
+                                    <td>${statusBadge(r.status, r.reviewed)}</td>
+                                    <td style="white-space:nowrap">
+                                        <button class="btn btn--primary btn--sm" ${r.outstanding_paise ? '' : 'disabled'}
+                                            onclick="Admin.recordInstructorPayout('${r.instructor_id}','${payoutSummaryMonth}')">Record payout</button>
+                                        <button class="btn btn--secondary btn--sm" onclick="Admin.openInstructorProfile('${r.instructor_id}','payouts')">Details</button>
+                                    </td>
+                                </tr>`).join('')}
+                            <tr style="font-weight:700;border-top:2px solid rgba(255,255,255,.15)">
+                                <td colspan="4">Totals (${payoutSummaryMonth})</td>
+                                <td>${totals.payable ? '₹' + (totals.payable / 100).toFixed(2) : '—'}</td>
+                                <td>₹${(totals.paid / 100).toFixed(2)}</td>
+                                <td colspan="3"></td>
+                            </tr>
+                            </tbody>
+                        </table>
+                        <p style="font-size:0.75rem;color:var(--color-text-muted);margin-top:8px">
+                            Calculated amounts are what the Academy owes — recording a payout only logs an actual transfer.
+                            Instructors without a configured rate are flagged and cannot be reviewed until the rate is set.</p>
+                        ` : '<p class="admin-empty__text" style="padding:10px 0">No instructors yet</p>'}
                     </div>
                 </div>
             `;
@@ -3823,7 +3903,8 @@ const Admin = (function() {
                 <td>${sc.is_active ? 'Active' : 'Inactive'}</td>
                 <td style="white-space:nowrap">
                     <button class="btn btn--primary btn--sm" onclick="Admin.wsScPrefill('${sc.day_of_week}','${sc.start_time.slice(0,5)}','${sc.end_time.slice(0,5)}','${escapeHtml(sc.instructor_name || '')}')">Change day/time…</button>
-                    <button class="btn btn--secondary btn--sm" onclick="Admin.assignInstructor('${sc.enrollment_id}','${sc.day_of_week}','${sc.start_time.slice(0,5)}','${sc.end_time.slice(0,5)}')">${sc.instructor_name ? 'Reassign instructor' : 'Assign instructor'}</button></td>
+                    <button class="btn btn--secondary btn--sm" onclick="Admin.assignInstructor('${sc.enrollment_id}','${sc.day_of_week}','${sc.start_time.slice(0,5)}','${sc.end_time.slice(0,5)}')">${sc.instructor_name ? 'Reassign instructor' : 'Assign instructor'}</button>
+                    <button class="btn btn--secondary btn--sm" onclick="Admin.wsDeleteSlot('${sc.id}')">Delete slot</button></td>
             </tr>`).join('');
 
         const reqRows = requests.map(r => `
@@ -5173,6 +5254,19 @@ const Admin = (function() {
                     <div class="admin-modal__field"><label class="auth__label">Travel buffer between offline classes (minutes)</label>
                         <input class="auth__input" id="eiTravel" type="number" min="0" max="600" placeholder="e.g. 30 — blank = cannot confirm travel"
                             value="${i.travel_buffer_minutes != null ? i.travel_buffer_minutes : ''}"></div>
+                    <div class="admin-modal__field"><label class="auth__label">Employment / Engagement type</label>
+                        <select class="auth__input" id="eiEmp">
+                            <option value="">— not set —</option>
+                            ${[['intern','Intern'],['part_time','Part-time instructor'],['regular','Regular employee'],['contract','Contract / session-based']]
+                                .map(([v,l]) => `<option value="${v}" ${i.employment_type === v ? 'selected' : ''}>${l}</option>`).join('')}
+                        </select></div>
+                    <div class="admin-modal__field"><label class="auth__label">Individual per-class rate (₹) — overrides category default</label>
+                        <input class="auth__input" id="eiRate" type="number" min="0" step="1" placeholder="leave blank to use category default"
+                            value="${i.per_class_rate_paise != null ? (i.per_class_rate_paise / 100) : ''}"></div>
+                    <div class="admin-modal__field"><label class="auth__label">Rate effective from</label>
+                        <input class="auth__input" id="eiRateFrom" type="date" value="${i.rate_effective_date || ''}"></div>
+                    <div class="admin-modal__field"><label class="auth__label">Contract / payment notes</label>
+                        <input class="auth__input" id="eiNotes" value="${escapeHtml(i.contract_notes || '')}"></div>
                     <p id="eiError" class="auth__error" style="display:none"></p>
                 </div>
                 <div class="admin-modal__footer">
@@ -5196,6 +5290,20 @@ const Admin = (function() {
         };
         const travel = (document.getElementById('eiTravel') || {}).value;
         if (travel !== '' && travel != null) body.travel_buffer_minutes = parseInt(travel, 10);
+        const emp = (document.getElementById('eiEmp') || {}).value;
+        if (emp !== undefined) body.employment_type = emp;
+        const rateEl = document.getElementById('eiRate');
+        if (rateEl) {
+            if (rateEl.value === '') {
+                body.per_class_rate_paise = -1;   // field is prefilled → blank = deliberate clear
+            } else {
+                body.per_class_rate_paise = Math.round(parseFloat(rateEl.value) * 100);
+                const rf = (document.getElementById('eiRateFrom') || {}).value;
+                if (rf) body.rate_effective_date = rf;
+            }
+        }
+        const notesEl = document.getElementById('eiNotes');
+        if (notesEl) body.contract_notes = notesEl.value;
         try {
             const btn = document.getElementById('eiBtn');
             btn.disabled = true; btn.textContent = 'Saving…';
@@ -5208,6 +5316,571 @@ const Admin = (function() {
             err.style.display = 'block';
             const btn = document.getElementById('eiBtn');
             if (btn) { btn.disabled = false; btn.textContent = 'Save Changes'; }
+        }
+    }
+
+    function payoutsMonthChange(v) {
+        if (v) { payoutSummaryMonth = v; renderInstructors(); }
+    }
+
+    async function instructorResetPin(id) {
+        if (!window.confirm('Reset this instructor\'s PIN? A new temporary PIN will be shown once and must be changed at next sign-in.')) return;
+        try {
+            const res = await apiCall(`/instructors/${id}/reset-pin`, { method: 'POST' });
+            showModal(`
+                <div class="admin-modal__header"><h3 class="admin-modal__title">Instructor PIN Reset</h3></div>
+                <div class="admin-modal__body">
+                    <p>Login ID: <strong>${escapeHtml(res.username || '')}</strong></p>
+                    <p>Temporary PIN: <strong style="font-size:20px;letter-spacing:4px">${escapeHtml(res.temp_pin || '')}</strong></p>
+                    <p style="font-size:0.8rem;color:var(--color-text-muted)">Shown once — must be changed at next sign-in.</p>
+                </div>
+                <div class="admin-modal__footer">
+                    <button class="btn btn--primary" onclick="Admin.closeModalDirect()">Done</button>
+                </div>`);
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    function rateSettingsModal() {
+        apiCall('/instructor-rates').then(rs => {
+            const labels = { intern: 'Intern', part_time: 'Part-time', regular: 'Regular employee', contract: 'Contract / session' };
+            const current = {};
+            (rs.defaults || []).forEach(d => {
+                if (!current[d.category] || d.effective_from > current[d.category].effective_from) current[d.category] = d;
+            });
+            showModal(`
+                <div class="admin-modal__header"><h3 class="admin-modal__title">Rate settings — category defaults</h3></div>
+                <div class="admin-modal__body">
+                    <p style="font-size:0.82rem;color:var(--color-text-muted)">Default per-class rates by employment category. Individual instructor rates (set in Edit) override these from their effective date. Historical payouts always keep the rate that applied at the time.</p>
+                    <table class="admin-table" style="margin-top:8px">
+                        <thead><tr><th>Category</th><th>Default rate</th><th>Effective from</th><th></th></tr></thead>
+                        <tbody>
+                        ${Object.keys(labels).map(k => `
+                            <tr>
+                                <td>${labels[k]}</td>
+                                <td>${current[k] ? '₹' + (current[k].per_class_rate_paise / 100).toFixed(2) : '<span style="color:var(--color-warning)">Not set</span>'}</td>
+                                <td>${current[k] ? current[k].effective_from : '—'}</td>
+                                <td><button class="btn btn--secondary btn--sm" onclick="Admin.setCategoryRate('${k}','${labels[k]}',${current[k] ? current[k].per_class_rate_paise : ''},'${current[k] ? current[k].effective_from : ''}')">Set</button></td>
+                            </tr>`).join('')}
+                        </tbody>
+                    </table>
+                    <p style="font-size:0.78rem;color:var(--color-text-muted);margin-top:8px">No rate is assumed — instructors in a category without a configured rate show “Rate Not Configured”.</p>
+                </div>
+                <div class="admin-modal__footer">
+                    <button class="btn btn--primary" onclick="Admin.closeModalDirect()">Close</button>
+                </div>`);
+        }).catch(e => showToast(e.message, 'error'));
+    }
+
+    function setCategoryRate(category, label, currentAmount, currentEff) {
+        const amount = window.prompt(`${label} — default per-class rate in ₹ (e.g. 500):`,
+            currentAmount !== '' && currentAmount != null ? (currentAmount / 100) : '');
+        if (amount === null) return;
+        const eff = window.prompt('Effective from (YYYY-MM-DD):',
+            currentEff || new Date().toISOString().slice(0, 10));
+        if (eff === null) return;
+        const paise = Math.round(parseFloat(amount) * 100);
+        if (!isFinite(paise) || paise <= 0) { showToast('Enter a positive rate in ₹', 'error'); return; }
+        apiCall('/instructor-rates', { method: 'PUT', body: JSON.stringify({
+            category, per_class_rate_paise: paise, effective_from: eff }) })
+            .then(() => { showToast('Category rate saved', 'success'); rateSettingsModal(); })
+            .catch(e => showToast(e.message, 'error'));
+    }
+
+    async function exportInstructorPayout(instructorId, month) {
+        try {
+            const token = localStorage.getItem('academy_token');
+            const resp = await fetch(apiOrigin() + `/api/v1/admin/instructors/${instructorId}/payouts/export?month=${month}`,
+                { headers: token ? { 'Authorization': `Bearer ${token}` } : {} });
+            if (!resp.ok) { const d = await resp.json().catch(() => ({})); throw new Error(d.detail || 'Export failed'); }
+            const blob = await resp.blob();
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `chankarts-payout-${month}.csv`;
+            document.body.appendChild(a); a.click(); a.remove();
+            URL.revokeObjectURL(a.href);
+            showToast('Statement downloaded', 'success');
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    // ========================================
+    // Instructor profile (tabs: overview / teaching / payouts)
+    // ========================================
+    let instructorProfile = null;
+
+    async function openInstructorProfile(id, tab) {
+        try {
+            const [instructors, schedules, sessions, enrollments, rate] = await Promise.all([
+                apiCall('/instructors'),
+                apiCall('/schedules'),
+                apiV1Call(`/sessions?instructor_id=${id}&limit=500`).catch(() => []),
+                apiCall('/enrollments'),
+                apiCall(`/instructors/${id}/rate`).catch(() => null),
+            ]);
+            const base = instructors.find(x => x.id === id);
+            if (!base) { showToast('Instructor not found', 'error'); return; }
+            instructorProfile = {
+                id, tab: tab || 'overview', base, rate,
+                month: payoutSummaryMonth,
+                schedules: (schedules.schedules || []).filter(x => x.instructor_id === id),
+                sessions: sessions || [],
+                enrollments: (enrollments || []).filter(x => x.instructor_id === id),
+                payout: null,
+            };
+            await loadInstructorPayout();
+            renderInstructorProfile();
+        } catch (e) { showToast(e.message || 'Could not open profile', 'error'); }
+    }
+
+    async function loadInstructorPayout() {
+        if (!instructorProfile) return;
+        try {
+            instructorProfile.payout = await apiCall(
+                `/instructors/${instructorProfile.id}/payouts?month=${instructorProfile.month}`);
+        } catch (e) {
+            instructorProfile.payout = { error: e.message };
+        }
+    }
+
+    function closeInstructorProfile() { instructorProfile = null; renderInstructors(); }
+    function setInstructorProfileTab(t) { instructorProfile.tab = t; renderInstructorProfile(); }
+
+    async function instructorProfileMonthChange(v) {
+        if (!v || !instructorProfile) return;
+        instructorProfile.month = v;
+        await loadInstructorPayout();
+        renderInstructorProfile();
+    }
+
+    const _empLabels = { intern: 'Intern', part_time: 'Part-time instructor',
+                         regular: 'Regular employee', contract: 'Contract / session-based' };
+
+    function _payoutStatusBadge(calc) {
+        const st = calc.status;
+        if (st === 'rate_not_configured') return '<span class="badge badge--pending">Rate Not Configured</span>';
+        if (st === 'paid') return '<span class="badge badge--approved">Paid</span>';
+        if (st === 'partially_paid') return '<span class="badge badge--pending">Partially Paid</span>';
+        if (st === 'reviewed') return '<span class="badge badge--approved">Reviewed</span>';
+        if (st === 'overpaid') return '<span class="badge badge--rejected">Overpaid</span>';
+        return `<span class="badge badge--pending">Calculated</span>`;
+    }
+
+    function renderInstructorProfile() {
+        const container = document.getElementById('adminContent');
+        if (!container || !instructorProfile) return;
+        const pr = instructorProfile;
+        const i = pr.base;
+        const rateInfo = (pr.rate && pr.rate.current) || {};
+        const payout = pr.payout && !pr.payout.error ? pr.payout : null;
+        const today = new Date().toISOString().slice(0, 10);
+        const nowMonth = today.slice(0, 7);
+
+        const header = `
+            <div class="admin-header">
+                <div>
+                    <button class="btn btn--secondary btn--sm" onclick="Admin.closeInstructorProfile()">← Instructors</button>
+                    <h1 class="admin-header__title" style="margin-top:8px">${escapeHtml(i.full_name)}
+                        <span class="badge badge--${i.is_active ? 'active' : 'inactive'}" style="font-size:0.55em;vertical-align:middle">${i.is_active ? 'Active' : 'Inactive'}</span></h1>
+                    <p class="admin-header__subtitle">
+                        ${escapeHtml(i.login_id || '')}${i.phone ? ' · ' + escapeHtml(i.phone) : ''}${i.email ? ' · ' + escapeHtml(i.email) : ''}
+                        ${i.created_at ? ' · Joined ' + formatDate(i.created_at.slice(0, 10)) : ''}
+                    </p>
+                </div>
+                <div class="admin-actions" style="display:flex;gap:8px;flex-wrap:wrap">
+                    <button class="btn btn--secondary btn--sm" onclick="Admin.editInstructorModal('${i.id}')">Edit Details</button>
+                    <button class="btn btn--secondary btn--sm" onclick="Admin.instructorResetPin('${i.id}')">Reset PIN</button>
+                    ${i.is_active
+                        ? `<button class="btn btn--secondary btn--sm" onclick="Admin.deactivateInstructor('${i.id}')">Deactivate</button>`
+                        : `<button class="btn btn--secondary btn--sm" onclick="Admin.setInstructorActive('${i.id}',true)">Reactivate</button>`}
+                    <button class="btn btn--secondary btn--sm" onclick="Admin.deleteInstructorPermanently('${i.id}')">Delete permanently</button>
+                </div>
+            </div>`;
+
+        const empBlock = `
+            <div class="admin-card" style="margin-bottom:14px"><div class="admin-card__body">
+                <div class="ws-grid">
+                    <div class="ws-stat"><div class="ws-stat__label">Employment type</div>
+                        <div class="ws-stat__value">${escapeHtml(_empLabels[i.employment_type] || 'Not set')}</div></div>
+                    <div class="ws-stat"><div class="ws-stat__label">Compensation</div>
+                        <div class="ws-stat__value">${i.compensation_mode === 'per_completed_class' ? 'Per completed class' : escapeHtml(i.compensation_mode || '—')}</div></div>
+                    <div class="ws-stat"><div class="ws-stat__label">Current rate</div>
+                        <div class="ws-stat__value">${rateInfo.rate_paise != null
+                            ? '₹' + (rateInfo.rate_paise / 100).toFixed(2) + '/class'
+                            : '<span style="color:var(--color-warning)">Rate Not Configured</span>'}</div></div>
+                    <div class="ws-stat"><div class="ws-stat__label">Rate source</div>
+                        <div class="ws-stat__value">${rateInfo.source === 'individual' ? 'Individual agreement'
+                            : rateInfo.source === 'category' ? 'Category default' : '—'}${rateInfo.as_of ? ' (as of ' + formatDate(rateInfo.as_of) + ')' : ''}</div></div>
+                    <div class="ws-stat"><div class="ws-stat__label">Travel buffer</div>
+                        <div class="ws-stat__value">${i.travel_buffer_minutes != null ? i.travel_buffer_minutes + ' min' : 'Not set'}</div></div>
+                    <div class="ws-stat"><div class="ws-stat__label">Specialisations</div>
+                        <div class="ws-stat__value">${escapeHtml(i.specializations || '—')}</div></div>
+                </div>
+                ${i.qualifications ? `<p style="font-size:0.82rem;margin-top:8px"><b>Qualifications:</b> ${escapeHtml(i.qualifications)}${i.experience_years ? ' · ' + escapeHtml(i.experience_years) + ' yrs experience' : ''}</p>` : ''}
+                ${i.contract_notes ? `<p style="font-size:0.8rem;color:var(--color-text-muted);margin-top:4px"><b>Notes:</b> ${escapeHtml(i.contract_notes)}</p>` : ''}
+            </div></div>`;
+
+        const tabs = `<div class="ws-tabs" style="margin-bottom:12px">
+            ${[['overview', 'Overview'], ['teaching', 'Teaching Record'], ['payouts', 'Payouts & Months']]
+                .map(([k, l]) => `<button class="ws-tab ${pr.tab === k ? 'ws-tab--active' : ''}"
+                    onclick="Admin.setInstructorProfileTab('${k}')">${l}</button>`).join('')}
+        </div>`;
+
+        let bodyHtml = '';
+        if (pr.tab === 'overview') {
+            bodyHtml = `
+                <div class="admin-card" style="margin-bottom:12px"><div class="admin-card__body">
+                    <h3 class="admin-card__title">Assigned students (${pr.enrollments.length})</h3>
+                    ${pr.enrollments.length ? `<table class="admin-table" style="margin-top:8px">
+                        <thead><tr><th>Student</th><th>CMA ID</th><th>Programme</th><th>Plan</th><th>Status</th></tr></thead>
+                        <tbody>${pr.enrollments.map(e => `<tr>
+                            <td>${escapeHtml(e.student_name)}</td><td>${escapeHtml(e.cma_registration_id || '')}</td>
+                            <td>${escapeHtml(e.programme_name)}</td>
+                            <td>${e.fee_plan ? (e.fee_plan === '4_classes' ? '4 classes' : e.fee_plan === '8_classes' ? '8 classes' : escapeHtml(e.fee_plan)) : '—'}</td>
+                            <td>${escapeHtml(e.status)}</td></tr>`).join('')}</tbody></table>`
+                        : '<p class="admin-empty__text">No assigned students</p>'}
+                </div></div>
+                <div class="admin-card"><div class="admin-card__body">
+                    <h3 class="admin-card__title">Recurring timetable (${pr.schedules.length})</h3>
+                    ${pr.schedules.length ? `<table class="admin-table" style="margin-top:8px">
+                        <thead><tr><th>Day</th><th>Time</th><th>Programme</th><th>Status</th></tr></thead>
+                        <tbody>${pr.schedules.map(sc => `<tr>
+                            <td>${(sc.day_of_week || '').charAt(0).toUpperCase() + (sc.day_of_week || '').slice(1)}</td>
+                            <td>${(sc.start_time || '').slice(0, 5)}–${(sc.end_time || '').slice(0, 5)}</td>
+                            <td>${escapeHtml(sc.instrument || '—')}</td>
+                            <td>${sc.is_active ? 'Active' : 'Inactive'}</td></tr>`).join('')}</tbody></table>`
+                        : '<p class="admin-empty__text">No recurring timetable entries</p>'}
+                </div></div>`;
+        } else if (pr.tab === 'teaching') {
+            const all = pr.sessions;
+            const upcoming = all.filter(x => x.scheduled_date >= today && ['scheduled', 'rescheduling_required'].includes(x.status));
+            const completedMonth = payout ? payout.completed_count : all.filter(x => x.status === 'completed').length;
+            const cancelled = all.filter(x => x.status === 'cancelled').length;
+            const byStatus = s => all.filter(x => x.status === s).length;
+            bodyHtml = `
+                <div class="admin-card" style="margin-bottom:12px"><div class="admin-card__body">
+                    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+                        <h3 class="admin-card__title">Teaching record</h3>
+                        <div style="display:flex;gap:8px;align-items:center">
+                            <input type="month" class="admin-filter" value="${pr.month}" style="width:150px"
+                                onchange="Admin.instructorProfileMonthChange(this.value)">
+                        </div>
+                    </div>
+                    <div class="ws-grid" style="margin-top:10px">
+                        <div class="ws-stat"><div class="ws-stat__label">Completed in ${pr.month}</div>
+                            <div class="ws-stat__value">${completedMonth}</div></div>
+                        <div class="ws-stat"><div class="ws-stat__label">Upcoming</div>
+                            <div class="ws-stat__value">${upcoming.length}</div></div>
+                        <div class="ws-stat"><div class="ws-stat__label">Scheduled (all time)</div>
+                            <div class="ws-stat__value">${byStatus('scheduled')}</div></div>
+                        <div class="ws-stat"><div class="ws-stat__label">Completed (all time)</div>
+                            <div class="ws-stat__value">${byStatus('completed')}</div></div>
+                        <div class="ws-stat"><div class="ws-stat__label">Cancelled</div>
+                            <div class="ws-stat__value">${cancelled}</div></div>
+                        <div class="ws-stat"><div class="ws-stat__label">Reschedule queue</div>
+                            <div class="ws-stat__value">${byStatus('rescheduling_required')}</div></div>
+                    </div>
+                </div></div>
+                <div class="admin-card" style="margin-bottom:12px"><div class="admin-card__body">
+                    <h3 class="admin-card__title">Upcoming classes (${upcoming.length})</h3>
+                    ${upcoming.length ? `<table class="admin-table" style="margin-top:8px">
+                        <thead><tr><th>Date</th><th>Time</th><th>Status</th></tr></thead>
+                        <tbody>${upcoming.slice(0, 30).map(x => `<tr>
+                            <td>${formatDate(x.scheduled_date)}</td>
+                            <td>${(x.scheduled_start || '').slice(0, 5)}–${(x.scheduled_end || '').slice(0, 5)}</td>
+                            <td><span class="badge badge--${getStatusBadgeClass(x.status)}">${formatStatus(x.status)}</span></td>
+                        </tr>`).join('')}</tbody></table>` : '<p class="admin-empty__text">No upcoming classes</p>'}
+                </div></div>
+                <div class="admin-card"><div class="admin-card__body">
+                    <h3 class="admin-card__title">Completed sessions in ${pr.month}</h3>
+                    ${payout && payout.session_rows ? '' : ''}
+                    ${payout ? `<table class="admin-table" style="margin-top:8px">
+                        <thead><tr><th>Date</th><th>Time</th><th>Rate applied</th></tr></thead>
+                        <tbody>${(payout.rate_breakdown || []).length ? '' : ''}
+                        ${all.filter(x => x.status === 'completed' && (x.billing_month || (x.actual_date || x.scheduled_date || '').slice(0, 7)) === pr.month)
+                            .map(x => `<tr><td>${formatDate(x.actual_date || x.scheduled_date)}</td>
+                                <td>${(x.scheduled_start || '').slice(0, 5)}–${(x.scheduled_end || '').slice(0, 5)}</td>
+                                <td>${(payout.rate_breakdown || []).length ? '' : 'see Payouts tab'}</td></tr>`).join('') ||
+                            '<tr><td colspan="3" style="color:var(--color-text-muted)">No completed sessions this month</td></tr>'}
+                        </tbody></table>` : ''}
+                </div></div>`;
+        } else { // payouts
+            const calc = payout;
+            bodyHtml = `
+                <div class="admin-card" style="margin-bottom:12px"><div class="admin-card__body">
+                    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+                        <h3 class="admin-card__title">Payout — ${pr.month}</h3>
+                        <div style="display:flex;gap:8px;align-items:center">
+                            <input type="month" class="admin-filter" value="${pr.month}" style="width:150px"
+                                onchange="Admin.instructorProfileMonthChange(this.value)">
+                            <button class="btn btn--secondary btn--sm" onclick="Admin.exportInstructorPayout('${i.id}','${pr.month}')">Export CSV</button>
+                        </div>
+                    </div>
+                    ${!calc ? '<p class="admin-empty__text">Loading…</p>' : `
+                    <div class="ws-grid" style="margin-top:10px">
+                        <div class="ws-stat"><div class="ws-stat__label">Completed classes</div><div class="ws-stat__value">${calc.completed_count}</div></div>
+                        <div class="ws-stat"><div class="ws-stat__label">Gross payable</div>
+                            <div class="ws-stat__value">${calc.payable_paise == null ? '<span style="color:var(--color-warning)">Rate N/C</span>' : '₹' + (calc.payable_paise / 100).toFixed(2)}</div></div>
+                        <div class="ws-stat"><div class="ws-stat__label">Paid</div><div class="ws-stat__value">₹${((calc.paid_paise || 0) / 100).toFixed(2)}</div></div>
+                        <div class="ws-stat"><div class="ws-stat__label">Outstanding</div>
+                            <div class="ws-stat__value">${calc.outstanding_paise == null ? '—' : '₹' + (calc.outstanding_paise / 100).toFixed(2)}</div></div>
+                        <div class="ws-stat"><div class="ws-stat__label">Status</div><div class="ws-stat__value">${_payoutStatusBadge(calc)}</div></div>
+                        <div class="ws-stat"><div class="ws-stat__label">Reviewed</div>
+                            <div class="ws-stat__value">${calc.reviewed ? formatDate((calc.reviewed.reviewed_at || '').slice(0, 10)) + (calc.reviewed.changed_since_review ? ' ⚠ changed since' : '') : 'Not yet'}</div></div>
+                    </div>
+                    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+                        <button class="btn btn--primary btn--sm" ${calc.outstanding_paise ? '' : 'disabled'}
+                            onclick="Admin.recordInstructorPayout('${i.id}','${pr.month}')">Record payout</button>
+                        <button class="btn btn--secondary btn--sm" ${(!calc.reviewed && calc.status !== 'rate_not_configured') ? '' : 'disabled'}
+                            onclick="Admin.reviewInstructorMonth('${i.id}','${pr.month}')">Mark reviewed</button>
+                    </div>`}
+                </div></div>
+                ${calc && calc.rate_breakdown && calc.rate_breakdown.length ? `
+                <div class="admin-card" style="margin-bottom:12px"><div class="admin-card__body">
+                    <h3 class="admin-card__title">Rate breakdown</h3>
+                    <table class="admin-table" style="margin-top:8px"><thead><tr><th>Rate</th><th>Classes</th><th>Subtotal</th></tr></thead>
+                    <tbody>${calc.rate_breakdown.map(b => `<tr><td>₹${(b.rate_paise / 100).toFixed(2)}</td><td>${b.count}</td><td>₹${(b.subtotal_paise / 100).toFixed(2)}</td></tr>`).join('')}</tbody></table>
+                </div></div>` : ''}
+                ${calc && calc.payouts && calc.payouts.length ? `
+                <div class="admin-card" style="margin-bottom:12px"><div class="admin-card__body">
+                    <h3 class="admin-card__title">Payout records (${calc.payouts.length})</h3>
+                    <table class="admin-table" style="margin-top:8px"><thead><tr>
+                        <th>Date</th><th>Amount</th><th>Method</th><th>Reference</th><th>Status</th><th></th></tr></thead>
+                    <tbody>${calc.payouts.map(p => `<tr>
+                        <td>${p.paid_at ? formatDate(p.paid_at) : '—'}</td>
+                        <td>${p.amount_paise < 0 ? '−₹' + (Math.abs(p.amount_paise) / 100).toFixed(2) : '₹' + (p.amount_paise / 100).toFixed(2)}${p.kind === 'adjustment' ? ' <span class="badge badge--pending">Adjustment</span>' : ''}</td>
+                        <td>${escapeHtml(p.method || '—')}</td>
+                        <td>${escapeHtml(p.reference || '—')}</td>
+                        <td>${p.status === 'reversed' ? '<span class="badge badge--rejected">Reversed</span>' : '<span class="badge badge--approved">Recorded</span>'}</td>
+                        <td>${p.kind === 'payout' && p.status === 'recorded'
+                            ? `<button class="btn btn--secondary btn--sm" onclick="Admin.reverseInstructorPayout('${p.id}')">Reverse</button>` : ''}</td>
+                    </tr>`).join('')}</tbody></table>
+                    <p style="font-size:0.75rem;color:var(--color-text-muted);margin-top:6px">Recording a payout logs an actual transfer — it never marks student fees as paid.</p>
+                </div></div>` : ''}
+                ${calc && calc.status === 'rate_not_configured' ? `
+                <div class="admin-card"><div class="admin-card__body" style="color:var(--color-warning)">
+                    <b>Rate Not Configured</b> — set an individual rate in Edit Details or a category default in Rate settings before reviewing or recording payouts for ${pr.month}.
+                    Missing rates on ${calc.missing_rate_session_ids.length} completed session(s).
+                </div></div>` : ''}`;
+        }
+
+        container.innerHTML = header + empBlock + tabs + bodyHtml;
+    }
+
+    function recordInstructorPayout(instructorId, month) {
+        const pr = instructorProfile && instructorProfile.id === instructorId ? instructorProfile : null;
+        const outstanding = pr && pr.payout && pr.payout.outstanding_paise;
+        showModal(`
+            <div class="admin-modal__header"><h3 class="admin-modal__title">Record instructor payout</h3></div>
+            <div class="admin-modal__body">
+                <p style="font-size:0.85rem">Records money the Academy has <b>actually transferred</b> to the instructor for <b>${escapeHtml(month)}</b>. This is separate from student fees.</p>
+                <div class="admin-modal__field"><label class="auth__label">Amount paid (₹) *</label>
+                    <input class="auth__input" id="rpAmount" type="number" min="1" step="1"
+                        value="${outstanding ? Math.floor(outstanding / 100) : ''}"></div>
+                <div class="admin-modal__field"><label class="auth__label">Paid on</label>
+                    <input class="auth__input" id="rpDate" type="date" value="${new Date().toISOString().slice(0, 10)}"></div>
+                <div class="admin-modal__field"><label class="auth__label">Method *</label>
+                    <select class="auth__input" id="rpMethod">
+                        <option value="upi">UPI</option><option value="bank_transfer">Bank transfer</option>
+                        <option value="cash">Cash</option><option value="cheque">Cheque</option>
+                    </select></div>
+                <div class="admin-modal__field"><label class="auth__label">Transaction / reference no.</label>
+                    <input class="auth__input" id="rpRef" placeholder="optional"></div>
+                <div class="admin-modal__field"><label class="auth__label">Notes</label>
+                    <input class="auth__input" id="rpNotes" placeholder="optional"></div>
+                <p id="rpError" class="auth__error" style="display:none"></p>
+            </div>
+            <div class="admin-modal__footer">
+                <button class="btn btn--secondary" onclick="Admin.closeModalDirect()">Cancel</button>
+                <button class="btn btn--primary" id="rpBtn" onclick="Admin.submitInstructorPayout('${instructorId}','${month}')">Record payout</button>
+            </div>`);
+    }
+
+    async function submitInstructorPayout(instructorId, month) {
+        const err = document.getElementById('rpError');
+        err.style.display = 'none';
+        const btn = document.getElementById('rpBtn');
+        try {
+            btn.disabled = true; btn.textContent = 'Recording…';
+            const amountRupees = parseFloat((document.getElementById('rpAmount') || {}).value);
+            await apiCall(`/instructors/${instructorId}/payouts`, { method: 'POST', body: JSON.stringify({
+                month,
+                amount_paise: Math.round(amountRupees * 100),
+                paid_at: (document.getElementById('rpDate') || {}).value,
+                method: (document.getElementById('rpMethod') || {}).value,
+                reference: (document.getElementById('rpRef') || {}).value || undefined,
+                notes: (document.getElementById('rpNotes') || {}).value || undefined,
+            }) });
+            closeModalDirect();
+            showToast('Payout recorded', 'success');
+            if (instructorProfile && instructorProfile.id === instructorId) await loadInstructorPayout();
+            if (instructorProfile) renderInstructorProfile(); else renderInstructors();
+        } catch (e) {
+            err.textContent = e.message; err.style.display = 'block';
+            btn.disabled = false; btn.textContent = 'Record payout';
+        }
+    }
+
+    async function reverseInstructorPayout(payoutId) {
+        const reason = window.prompt('Reason for reversing this payout (recorded as an auditable adjustment):');
+        if (reason === null) return;
+        try {
+            await apiCall(`/payouts/${payoutId}/reverse`, { method: 'POST',
+                body: JSON.stringify({ reason: reason || 'Correction' }) });
+            showToast('Payout reversed (adjustment recorded)', 'success');
+            await loadInstructorPayout();
+            renderInstructorProfile();
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function reviewInstructorMonth(instructorId, month) {
+        if (!window.confirm(`Mark ${month} payout as reviewed? All completed sessions must have a configured rate.`)) return;
+        try {
+            await apiCall(`/instructors/${instructorId}/payout-review`, { method: 'POST',
+                body: JSON.stringify({ month }) });
+            showToast('Month reviewed', 'success');
+            await loadInstructorPayout();
+            renderInstructorProfile();
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    // ========================================
+    // Timetable slot deletion (single recurring row)
+    // ========================================
+    async function wsDeleteSlot(slotId) {
+        try {
+            const imp = await apiCall(`/schedules/${slotId}/delete-impact`);
+            const sc = imp.schedule || {};
+            const future = imp.future_sessions || [];
+            showModal(`
+                <div class="admin-modal__header"><h3 class="admin-modal__title">Delete timetable slot</h3></div>
+                <div class="admin-modal__body">
+                    <div class="ws-grid" style="margin-bottom:10px">
+                        <div class="ws-stat"><div class="ws-stat__label">Student</div>
+                            <div class="ws-stat__value">${escapeHtml((sc.student || {}).full_name || '—')}<div style="font-size:0.72rem">${escapeHtml((sc.student || {}).cma_registration_id || '')}</div></div></div>
+                        <div class="ws-stat"><div class="ws-stat__label">Programme</div><div class="ws-stat__value">${escapeHtml(sc.instrument || '—')}</div></div>
+                        <div class="ws-stat"><div class="ws-stat__label">Recurring slot</div>
+                            <div class="ws-stat__value">${(sc.day_of_week || '').charAt(0).toUpperCase() + (sc.day_of_week || '').slice(1)}s ${escapeHtml((sc.start_time || '').slice(0, 5))}–${escapeHtml((sc.end_time || '').slice(0, 5))}</div></div>
+                        <div class="ws-stat"><div class="ws-stat__label">Instructor</div>
+                            <div class="ws-stat__value">${escapeHtml(sc.instructor_name || 'Unassigned')}${sc.instructor_active === false ? ' <span class="badge badge--inactive">Inactive</span>' : ''}</div></div>
+                        <div class="ws-stat"><div class="ws-stat__label">Status</div>
+                            <div class="ws-stat__value">${sc.is_active ? 'Active' : 'Inactive'}</div></div>
+                        <div class="ws-stat"><div class="ws-stat__label">History kept</div>
+                            <div class="ws-stat__value">${imp.historical_count || 0} completed/historical</div></div>
+                    </div>
+                    ${future.length ? `
+                        <p style="font-size:0.85rem"><b>${future.length} future scheduled class(es)</b> match this slot:</p>
+                        <ul style="font-size:0.8rem;margin:4px 0 8px 18px">${future.slice(0, 8).map(f =>
+                            `<li>${formatDate(f.date)} ${f.start}–${f.end}</li>`).join('')}${future.length > 8 ? '<li>…</li>' : ''}</ul>
+                        <label style="font-size:0.85rem;display:block;margin-bottom:6px">
+                            <input type="checkbox" id="dscCancel" checked>
+                            Also cancel these ${future.length} future class(es) so no orphaned appointments remain
+                        </label>` : '<p style="font-size:0.85rem">No future scheduled classes match this slot.</p>'}
+                    ${imp.rescheduling_pending_count ? `<p style="font-size:0.78rem;color:var(--color-text-muted)">${imp.rescheduling_pending_count} pending reschedule request(s) are kept untouched.</p>` : ''}
+                    <p style="font-size:0.78rem;color:var(--color-text-muted)">Completed classes, attendance and history are never modified. The student, enrolment and instructor profiles remain intact.</p>
+                    <p id="dscError" class="auth__error" style="display:none"></p>
+                </div>
+                <div class="admin-modal__footer">
+                    <button class="btn btn--secondary" onclick="Admin.closeModalDirect()">Cancel</button>
+                    <button class="btn btn--primary" id="dscBtn" onclick="Admin.wsDeleteSlotSubmit('${slotId}')">Delete slot</button>
+                </div>`);
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function wsDeleteSlotSubmit(slotId) {
+        const err = document.getElementById('dscError');
+        err.style.display = 'none';
+        const btn = document.getElementById('dscBtn');
+        const cancelEl = document.getElementById('dscCancel');
+        const cancelFuture = !!(cancelEl && cancelEl.checked);
+        try {
+            btn.disabled = true; btn.textContent = 'Deleting…';
+            const res = await apiCall(`/schedules/${slotId}?cancel_future=${cancel_future}`, { method: 'DELETE' });
+            closeModalDirect();
+            showToast(`Slot deleted${res.cancelled_future ? ` + ${res.cancelled_future} future class(es) cancelled` : ''}`, 'success');
+            if (studentWs.active) {
+                delete studentWs.data.classes;
+                await loadWsTab('classes');
+                render();
+            } else if (typeof renderClasses === 'function') {
+                renderClasses();
+            }
+        } catch (e) {
+            err.textContent = e.message; err.style.display = 'block';
+            btn.disabled = false; btn.textContent = 'Delete slot';
+        }
+    }
+
+    // ========================================
+    // Instructor permanent deletion (dependency-aware)
+    // ========================================
+    async function deleteInstructorPermanently(id) {
+        try {
+            const [imp, all] = await Promise.all([
+                apiCall(`/instructors/${id}/delete-impact`),
+                apiCall('/instructors'),
+            ]);
+            const ins = imp.instructor || {};
+            const future = imp.future_sessions || [];
+            const others = all.filter(x => x.id !== id && x.is_active);
+            showModal(`
+                <div class="admin-modal__header"><h3 class="admin-modal__title">Delete instructor permanently</h3></div>
+                <div class="admin-modal__body">
+                    <p style="font-size:0.9rem"><b>${escapeHtml(ins.name || '')}</b> ${ins.is_active ? '<span class="badge badge--active">Active</span>' : '<span class="badge badge--inactive">Inactive</span>'} · ${escapeHtml(ins.login_id || '')}</p>
+                    <p style="font-size:0.82rem;color:var(--color-text-muted);margin-bottom:8px">
+                        Deactivation keeps everything — recommended if this instructor may return. Deletion is permanent for the profile/login but preserves history as described below.</p>
+                    <table class="admin-table"><tbody>
+                        <tr><td>Assigned students</td><td><b>${(imp.students || []).length}</b> ${((imp.students || []).length ? '— ' + imp.students.slice(0, 4).map(x => escapeHtml(x.name)).join(', ') + ((imp.students || []).length > 4 ? '…' : '') : '')}</td></tr>
+                        <tr><td>Weekly timetable slots</td><td><b>${imp.weekly_slots}</b> (kept, instructor cleared)</td></tr>
+                        <tr><td>Future scheduled classes</td><td><b>${future.length}</b> ${future.length ? '— ' + future.slice(0, 4).map(f => formatDate(f.date)).join(', ') : ''}</td></tr>
+                        <tr><td>Completed classes (kept)</td><td><b>${imp.completed_sessions}</b></td></tr>
+                        <tr><td>Attendance rows (kept)</td><td><b>${imp.attendance_rows}</b></td></tr>
+                        <tr><td>Payout records (kept)</td><td><b>${imp.payout_rows_retained}</b></td></tr>
+                    </tbody></table>
+                    <div style="margin-top:10px;font-size:0.85rem"><b>Resolve future classes:</b></div>
+                    <label style="display:block;margin-top:4px"><input type="radio" name="diFuture" value="unassign" checked onchange="Admin.diFutureChange()"> Keep them, clear the instructor (student stays scheduled — assign later)</label>
+                    <label style="display:block"><input type="radio" name="diFuture" value="cancel" onchange="Admin.diFutureChange()"> Cancel the ${future.length} future class(es) (rows kept as cancelled)</label>
+                    ${others.length ? `<label style="display:block"><input type="radio" name="diFuture" value="reassign" onchange="Admin.diFutureChange()"> Reassign future classes, enrolments &amp; slots to another instructor</label>
+                    <select class="auth__input" id="diTarget" style="display:none;margin-top:4px">
+                        ${others.map(o => `<option value="${o.id}">${escapeHtml(o.full_name)}</option>`).join('')}
+                    </select>` : ''}
+                    <p style="font-size:0.75rem;color:var(--color-text-muted);margin-top:8px">Completed sessions, attendance, reports and payouts are preserved (teaching attribution cleared — never given to anyone else). Sign-in stops working immediately.</p>
+                    <p id="diError" class="auth__error" style="display:none"></p>
+                </div>
+                <div class="admin-modal__footer">
+                    <button class="btn btn--secondary" onclick="Admin.closeModalDirect()">Cancel</button>
+                    <button class="btn btn--secondary" onclick="Admin.closeModalDirect();Admin.deactivateInstructor('${id}')">Deactivate instead</button>
+                    <button class="btn btn--primary" id="diBtn" onclick="Admin.deleteInstructorSubmit('${id}')">Delete permanently</button>
+                </div>`);
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    function diFutureChange() {
+        const sel = document.querySelector('input[name="diFuture"]:checked');
+        const target = document.getElementById('diTarget');
+        if (target) target.style.display = (sel && sel.value === 'reassign') ? '' : 'none';
+    }
+
+    async function deleteInstructorSubmit(id) {
+        const err = document.getElementById('diError');
+        err.style.display = 'none';
+        const btn = document.getElementById('diBtn');
+        const sel = document.querySelector('input[name="diFuture"]:checked');
+        const action = sel ? sel.value : 'unassign';
+        const targetEl = document.getElementById('diTarget');
+        try {
+            btn.disabled = true; btn.textContent = 'Deleting…';
+            let url = `/instructors/${id}?future_action=${action}`;
+            if (action === 'reassign' && targetEl && targetEl.value) {
+                url += `&reassign_instructor_id=${targetEl.value}`;
+            }
+            const res = await apiCall(url, { method: 'DELETE' });
+            closeModalDirect();
+            const r = res.resolved || {};
+            showToast(`Instructor deleted — future: ${r.future_sessions}, enrolments: ${r.enrollments}, history preserved`, 'success');
+            if (instructorProfile && instructorProfile.id === id) instructorProfile = null;
+            renderInstructors();
+        } catch (e) {
+            err.textContent = e.message; err.style.display = 'block';
+            btn.disabled = false; btn.textContent = 'Delete permanently';
         }
     }
 
@@ -6480,6 +7153,24 @@ const Admin = (function() {
         editInstructorModal(id) {
             editInstructorModal(id);
         },
+        instructorResetPin(id) { instructorResetPin(id); },
+        rateSettingsModal() { rateSettingsModal(); },
+        setCategoryRate(c, l, a, e) { setCategoryRate(c, l, a, e); },
+        openInstructorProfile(id, tab) { openInstructorProfile(id, tab); },
+        closeInstructorProfile() { closeInstructorProfile(); },
+        setInstructorProfileTab(t) { setInstructorProfileTab(t); },
+        instructorProfileMonthChange(v) { instructorProfileMonthChange(v); },
+        recordInstructorPayout(id, m) { recordInstructorPayout(id, m); },
+        submitInstructorPayout(id, m) { submitInstructorPayout(id, m); },
+        reverseInstructorPayout(id) { reverseInstructorPayout(id); },
+        reviewInstructorMonth(id, m) { reviewInstructorMonth(id, m); },
+        exportInstructorPayout(id, m) { exportInstructorPayout(id, m); },
+        deleteInstructorPermanently(id) { deleteInstructorPermanently(id); },
+        deleteInstructorSubmit(id) { deleteInstructorSubmit(id); },
+        diFutureChange() { diFutureChange(); },
+        payoutsMonthChange(v) { payoutsMonthChange(v); },
+        wsDeleteSlot(id) { wsDeleteSlot(id); },
+        wsDeleteSlotSubmit(id) { wsDeleteSlotSubmit(id); },
         submitEditInstructor(id) {
             submitEditInstructor(id);
         },

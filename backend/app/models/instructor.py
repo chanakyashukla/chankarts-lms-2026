@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, ForeignKey, Boolean, Integer
+from sqlalchemy import Column, String, DateTime, Date, Text, ForeignKey, Boolean, Integer
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -31,6 +31,15 @@ class Instructor(Base):
     # consecutive OFFLINE classes. NULL = travel cannot be confirmed
     # (availability then reports "requires clarification" instead of guessing).
     travel_buffer_minutes = Column(Integer, nullable=True)
+
+    # Employment / engagement + compensation (per completed class, INR paise).
+    # Category defaults live in instructor_rate_rules; per_class_rate_paise
+    # here is NULL until an individual agreed rate is configured.
+    employment_type = Column(String(40), nullable=True)          # intern|part_time|regular|contract
+    compensation_mode = Column(String(40), default="per_completed_class", nullable=False)
+    per_class_rate_paise = Column(Integer, nullable=True)
+    rate_effective_date = Column(Date, nullable=True)
+    contract_notes = Column(Text, nullable=True)
     
     # Relationships
     user = relationship("User", back_populates="instructor_profile")

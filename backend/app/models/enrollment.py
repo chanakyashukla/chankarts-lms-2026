@@ -25,7 +25,7 @@ class Enrollment(Base):
     programme_name = Column(String(100), nullable=False)  # Piano, Acoustic Guitar, etc.
     
     # Instructor assignment
-    instructor_id = Column(UUID(as_uuid=True), ForeignKey("instructors.id"), nullable=True)
+    instructor_id = Column(UUID(as_uuid=True), ForeignKey("instructors.id", ondelete="SET NULL"), nullable=True)
     
     # Fee plan
     fee_plan = Column(String(20))  # 4_classes, 8_classes

@@ -37,7 +37,7 @@ class ClassSession(Base):
 
     enrollment_id = Column(UUID(as_uuid=True), ForeignKey("enrollments.id", ondelete="CASCADE"), nullable=False, index=True)
     student_id = Column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False, index=True)
-    instructor_id = Column(UUID(as_uuid=True), ForeignKey("instructors.id", ondelete="CASCADE"), nullable=True, index=True)  # nullable: instructor not yet assigned
+    instructor_id = Column(UUID(as_uuid=True), ForeignKey("instructors.id", ondelete="SET NULL"), nullable=True, index=True)  # historical sessions survive instructor deletion
 
     # Scheduled (agreed) slot
     scheduled_date = Column(Date, nullable=False, index=True)

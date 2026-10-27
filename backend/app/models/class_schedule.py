@@ -13,7 +13,7 @@ class ClassSchedule(Base):
     
     # Links
     enrollment_id = Column(UUID(as_uuid=True), ForeignKey("enrollments.id", ondelete="CASCADE"), nullable=False)
-    instructor_id = Column(UUID(as_uuid=True), ForeignKey("instructors.id"), nullable=True)  # nullable: instructor not yet assigned
+    instructor_id = Column(UUID(as_uuid=True), ForeignKey("instructors.id", ondelete="SET NULL"), nullable=True)  # nullable: instructor not yet assigned
     
     # Schedule details
     day_of_week = Column(String(10), nullable=False)  # monday, tuesday, etc.

@@ -14,7 +14,7 @@ class Progress(Base):
     # Links
     enrollment_id = Column(UUID(as_uuid=True), ForeignKey("enrollments.id", ondelete="CASCADE"), nullable=False)
     student_id = Column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
-    instructor_id = Column(UUID(as_uuid=True), ForeignKey("instructors.id"), nullable=False)
+    instructor_id = Column(UUID(as_uuid=True), ForeignKey("instructors.id", ondelete="SET NULL"), nullable=True)
     
     # Progress details
     month = Column(String(7), nullable=False)  # MM-YYYY
