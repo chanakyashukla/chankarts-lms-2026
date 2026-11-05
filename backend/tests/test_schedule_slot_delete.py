@@ -149,7 +149,9 @@ def _future_weekday(weekday: int, weeks: int = 0) -> date:
 async def test_impact_reports_future_and_history(client, admin_user):
     h = auth(admin_user)
     w = await _world()
-    done = await _add(w["student"], w["enrollment"], w["instructor"], date.today() - timedelta(days=8), time(17, 0), time(18, 0), "completed")
+    # completed session on a PAST Monday (same weekday as the slot — matches the pattern)
+    done_date = _future_weekday(0) - timedelta(days=7)
+    done = await _add(w["student"], w["enrollment"], w["instructor"], done_date, time(17, 0), time(18, 0), "completed")
     fut_date = _future_weekday(0)   # next Monday — matches the Monday slot
     fut = await _add(w["student"], w["enrollment"], w["instructor"], fut_date, time(17, 0), time(18, 0))
     r = await client.get(f"/api/v1/admin/schedules/{w['mon']}/delete-impact", headers=h)

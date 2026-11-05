@@ -1627,6 +1627,22 @@ class RecommendationCreate(BaseModel):
     target_student_ids: Optional[list] = None
 
 
+class RecommendationPatch(BaseModel):
+    resource_type: Optional[str] = Field(None, pattern="^(book|instrument|accessory|stand_notebook|metronome_tuner|online_link)$")
+    name: Optional[str] = Field(None, min_length=2, max_length=200)
+    author_or_brand: Optional[str] = None
+    description: Optional[str] = None
+    suitability: Optional[str] = None
+    programme_id: Optional[str] = None
+    image_url: Optional[str] = None
+    external_url: Optional[str] = Field(None, max_length=500)
+    faculty_note: Optional[str] = None
+    sort_order: Optional[int] = None
+    is_active: Optional[bool] = None
+    visibility_scope: Optional[str] = None
+    target_student_ids: Optional[list] = None   # explicit [] clears; None keeps
+
+
 class ResourcePatch(BaseModel):
     visibility_scope: Optional[str] = None
     target_student_ids: Optional[list] = None
@@ -1647,8 +1663,11 @@ async def list_recommendations(
     current_user: User = Depends(get_current_user),
 ):
     candidates = await _audience_student_ids_for_user(db, current_user)
+    staff = _is_staff(user=current_user)
 
-    query = select(ResourceRecommendation).where(ResourceRecommendation.is_active.is_(True))
+    query = select(ResourceRecommendation)
+    if not staff:
+        query = query.where(ResourceRecommendation.is_active.is_(True))
     if resource_type:
         query = query.where(ResourceRecommendation.resource_type == resource_type)
     if programme_id:
@@ -1657,8 +1676,16 @@ async def list_recommendations(
             | (ResourceRecommendation.programme_id.is_(None))
         )
     result = await db.execute(query.order_by(ResourceRecommendation.sort_order.asc()))
+    rows = result.scalars().all()
+    target_map = {}
+    if staff and rows:
+        trows = (await db.execute(select(ResourceVisibilityTarget).where(
+            ResourceVisibilityTarget.resource_kind == "recommendation",
+            ResourceVisibilityTarget.resource_id.in_([r.id for r in rows])))).scalars().all()
+        for t in trows:
+            target_map.setdefault(str(t.resource_id), []).append(str(t.student_id))
     out = []
-    for r in result.scalars().all():
+    for r in rows:
         if candidates is not None:
             ok = await _audience_allows(
                 db, kind="recommendation", resource_id=r.id,
@@ -1681,6 +1708,10 @@ async def list_recommendations(
                 "image_url": r.image_url,
                 "external_url": r.external_url,
                 "faculty_note": r.faculty_note,
+                **({"is_active": bool(r.is_active),
+                    "sort_order": r.sort_order or 0,
+                    "target_student_ids": target_map.get(str(r.id), []),
+                    "updated_at": r.updated_at.isoformat() if r.updated_at else None} if staff else {}),
             }
         )
     return out
@@ -1716,6 +1747,109 @@ async def create_recommendation(
     await db.flush()
     return {"id": str(row.id), "name": row.name, "visibility_scope": scope,
             "target_students": targets}
+
+
+@router.patch("/recommendations/{recommendation_id}")
+async def update_recommendation(
+    recommendation_id: UUID,
+    body: RecommendationPatch,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Admin/staff edit of a recommendation — content, audience, visibility."""
+    await _require_staff(db, current_user)
+    row = (await db.execute(select(ResourceRecommendation).where(
+        ResourceRecommendation.id == recommendation_id))).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Recommendation not found")
+    if body.external_url and not body.external_url.lower().startswith("https://"):
+        raise HTTPException(status_code=400, detail="External links must use https://")
+
+    before = {"name": row.name, "is_active": bool(row.is_active),
+              "visibility_scope": row.visibility_scope or "all"}
+
+    if body.visibility_scope is not None:
+        scope = _parse_scope(body.visibility_scope)
+        if scope == "programme" and not (body.programme_id or row.programme_id):
+            raise HTTPException(status_code=400, detail="visibility_scope=programme needs a programme_id")
+        row.visibility_scope = scope
+    if body.programme_id is not None:
+        row.programme_id = body.programme_id.strip() or None
+    for field in ("resource_type", "name", "author_or_brand", "description",
+                  "suitability", "image_url", "external_url", "faculty_note"):
+        value = getattr(body, field)
+        if value is not None:
+            setattr(row, field, value.strip() if isinstance(value, str) else value)
+    if body.sort_order is not None:
+        row.sort_order = body.sort_order
+    if body.is_active is not None:
+        row.is_active = bool(body.is_active)
+    if row.name is None or len(row.name) < 2:
+        raise HTTPException(status_code=400, detail="Name must be at least 2 characters")
+    db.add(row)
+
+    targets_replaced = None
+    if body.target_student_ids is not None:
+        # explicit replace (empty list clears the audience)
+        for t in (await db.execute(select(ResourceVisibilityTarget).where(
+                ResourceVisibilityTarget.resource_kind == "recommendation",
+                ResourceVisibilityTarget.resource_id == row.id))).scalars().all():
+            await db.delete(t)
+        targets_replaced = 0
+        for sid in body.target_student_ids:
+            sid = UUID(str(sid))
+            if not (await db.execute(select(Student).where(Student.id == sid))).scalar_one_or_none():
+                raise HTTPException(status_code=400, detail=f"Unknown student {sid}")
+            db.add(ResourceVisibilityTarget(
+                resource_kind="recommendation", resource_id=row.id, student_id=sid,
+                created_by=current_user.id))
+            targets_replaced += 1
+    await db.flush()
+    await record_audit(
+        db, action="recommendation.updated", entity_type="recommendation",
+        entity_id=str(row.id), actor_user_id=current_user.id,
+        actor_role=current_user.role.value, before_data=before,
+        after_data={"name": row.name, "is_active": bool(row.is_active),
+                    "visibility_scope": row.visibility_scope or "all"},
+        summary=f"Recommendation updated: {row.name}"
+                + (" (hidden)" if not row.is_active else "")
+                + (f"; audience targets={targets_replaced}" if targets_replaced is not None else ""),
+    )
+    return {"ok": True, "id": str(row.id), "name": row.name,
+            "is_active": bool(row.is_active),
+            "visibility_scope": row.visibility_scope or "all",
+            "target_students": targets_replaced}
+
+
+@router.delete("/recommendations/{recommendation_id}")
+async def delete_recommendation(
+    recommendation_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Permanently remove a recommendation from the shared catalogue
+    (also removes its per-student visibility grants)."""
+    await _require_staff(db, current_user)
+    row = (await db.execute(select(ResourceRecommendation).where(
+        ResourceRecommendation.id == recommendation_id))).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Recommendation not found")
+    name = row.name
+    was_active = bool(row.is_active)
+    for t in (await db.execute(select(ResourceVisibilityTarget).where(
+            ResourceVisibilityTarget.resource_kind == "recommendation",
+            ResourceVisibilityTarget.resource_id == row.id))).scalars().all():
+        await db.delete(t)
+    await db.delete(row)
+    await db.flush()
+    await record_audit(
+        db, action="recommendation.deleted", entity_type="recommendation",
+        entity_id=str(recommendation_id), actor_user_id=current_user.id,
+        actor_role=current_user.role.value,
+        summary=f"Recommendation removed from catalogue: {name}"
+                + ("" if was_active else " (was hidden)"),
+    )
+    return {"deleted": True, "id": str(recommendation_id), "name": name}
 
 
 @router.patch("/materials/{material_id}")

@@ -3201,16 +3201,20 @@ const Admin = (function() {
                         ${items.length > 0 ? `
                             <table class="admin-table">
                                 <thead>
-                                    <tr><th>Name</th><th>Type</th><th>Author / Brand</th><th>Link</th><th>Faculty Note</th></tr>
+                                    <tr><th>Name</th><th>Type</th><th>Author / Brand</th><th>Link</th><th>Faculty Note</th><th></th></tr>
                                 </thead>
                                 <tbody>
                                     ${items.map(r => `
                                         <tr>
-                                            <td><strong>${escapeHtml(r.name)}</strong>${r.suitability ? `<br><small>${escapeHtml(r.suitability)}</small>` : ''}</td>
+                                            <td><strong>${escapeHtml(r.name)}</strong>${r.suitability ? `<br><small>${escapeHtml(r.suitability)}</small>` : ''}${r.is_active === false ? ' <span class="badge badge--inactive">Hidden</span>' : ''}</td>
                                             <td><span class="badge badge--accent">${escapeHtml(r.resource_type)}</span></td>
                                             <td>${escapeHtml(r.author_or_brand || '—')}</td>
                                             <td>${r.external_url ? `<a href="${escapeHtml(r.external_url)}" target="_blank" rel="noopener">Open</a>` : '—'}</td>
                                             <td>${escapeHtml(r.faculty_note || '—')}</td>
+                                            <td style="white-space:nowrap">
+                                                <button class="btn btn--secondary btn--sm" onclick="Admin.editResourceModal('${r.id}')">Edit</button>
+                                                <button class="btn btn--secondary btn--sm" onclick="Admin.deleteResource('${r.id}')">Delete</button>
+                                            </td>
                                         </tr>
                                     `).join('')}
                                 </tbody>
@@ -3333,6 +3337,114 @@ const Admin = (function() {
             showToast('Recommendation added — visible only to its audience.', 'success');
             renderResources();
         } catch (e) { alert(e.message); }
+    }
+
+    async function editResourceModal(id) {
+        try {
+            const items = await apiV1Call('/learning/recommendations');
+            const r = (items || []).find(x => x.id === id);
+            if (!r) { showToast('Recommendation not found', 'error'); return; }
+            const students = await apiCall('/students');
+            const targets = r.target_student_ids || [];
+            showModal(`
+                <div class="admin-modal__header">
+                    <h2 class="admin-modal__title">Edit Resource Recommendation</h2>
+                </div>
+                <div class="admin-modal__body">
+                    <label class="form-label">Resource type</label>
+                    <select id="resType" class="auth__input">
+                        ${RESOURCE_TYPES.map(t => `<option value="${t.id}" ${r.resource_type === t.id ? 'selected' : ''}>${t.label}</option>`).join('')}
+                    </select>
+                    <label class="form-label" style="margin-top:12px;">Name</label>
+                    <input id="resName" class="auth__input" value="${escapeHtml(r.name || '')}" />
+                    <label class="form-label" style="margin-top:12px;">Author / Brand</label>
+                    <input id="resAuthor" class="auth__input" value="${escapeHtml(r.author_or_brand || '')}" />
+                    <label class="form-label" style="margin-top:12px;">Description</label>
+                    <textarea id="resDescription" class="auth__input auth__textarea" rows="2">${escapeHtml(r.description || '')}</textarea>
+                    <label class="form-label" style="margin-top:12px;">Suitability</label>
+                    <input id="resSuitability" class="auth__input" value="${escapeHtml(r.suitability || '')}" />
+                    <label class="form-label" style="margin-top:12px;">External URL (optional)</label>
+                    <input id="resUrl" class="auth__input" placeholder="https://" value="${escapeHtml(r.external_url || '')}" />
+                    <label class="form-label" style="margin-top:12px;">Faculty note</label>
+                    <textarea id="resNote" class="auth__input auth__textarea" rows="2">${escapeHtml(r.faculty_note || '')}</textarea>
+                    <label class="form-label" style="margin-top:12px;">Who can see this?</label>
+                    <select id="resScope" class="auth__input" onchange="Admin.toggleResourceScope()">
+                        ${[['all','All active students'],['programme','Students on a specific instrument / course'],
+                           ['level','Students at a specific level'],['students','Only specific student(s)']]
+                            .map(([v, l]) => `<option value="${v}" ${r.visibility_scope === v ? 'selected' : ''}>${l}</option>`).join('')}
+                    </select>
+                    <div id="resProgrammeWrap" style="${(r.visibility_scope === 'programme' || r.visibility_scope === 'level') ? '' : 'display:none'}">
+                        <label class="form-label" style="margin-top:12px;">Instrument / course id</label>
+                        <input id="resProgramme" class="auth__input" placeholder="piano, guitar, ukulele…" value="${escapeHtml(r.programme_id || '')}" />
+                    </div>
+                    <div id="resStudentsWrap" style="${r.visibility_scope === 'students' ? '' : 'display:none'}">
+                        <label class="form-label" style="margin-top:12px;">Students</label>
+                        <select id="resStudents" class="auth__input" multiple size="5">
+                            ${(students || []).map(st => `<option value="${st.id}" ${targets.includes(st.id) ? 'selected' : ''}>${escapeHtml(st.full_name)}</option>`).join('')}
+                        </select>
+                    </div>
+                    <label class="form-label" style="margin-top:14px;display:flex;gap:8px;align-items:center">
+                        <input type="checkbox" id="resActive" ${r.is_active === false ? '' : 'checked'} />
+                        Visible to students (uncheck to hide without deleting)
+                    </label>
+                </div>
+                <div class="admin-modal__footer">
+                    <button class="btn btn--secondary" onclick="Admin.closeModalDirect()">Cancel</button>
+                    <button class="btn btn--primary" id="resSaveBtn" onclick="Admin.confirmResourceEdit('${r.id}')">Save changes</button>
+                </div>`);
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function confirmResourceEdit(id) {
+        const name = document.getElementById('resName').value.trim();
+        const scope = (document.getElementById('resScope') || {}).value || 'all';
+        const programme = ((document.getElementById('resProgramme') || {}).value || '').trim() || null;
+        const targets = Array.from((document.getElementById('resStudents') || {}).selectedOptions || [])
+            .map(o => o.value);
+        if (!name) { alert('Name is required'); return; }
+        if (scope === 'programme' && !programme) { alert('Enter the instrument / course id for this audience'); return; }
+        if (scope === 'students' && !targets.length) { alert('Select at least one student'); return; }
+        try {
+            const btn = document.getElementById('resSaveBtn');
+            if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+            await apiV1Call(`/learning/recommendations/${id}`, {
+                method: 'PATCH',
+                body: JSON.stringify({
+                    resource_type: document.getElementById('resType').value,
+                    name,
+                    author_or_brand: document.getElementById('resAuthor').value.trim() || null,
+                    description: document.getElementById('resDescription').value.trim() || null,
+                    suitability: document.getElementById('resSuitability').value.trim() || null,
+                    external_url: document.getElementById('resUrl').value.trim() || null,
+                    faculty_note: document.getElementById('resNote').value.trim() || null,
+                    visibility_scope: scope,
+                    programme_id: scope === 'programme' || scope === 'level' ? programme : null,
+                    target_student_ids: scope === 'students' ? targets : [],
+                    is_active: document.getElementById('resActive').checked,
+                }),
+            });
+            closeModalDirect();
+            showToast('Recommendation updated', 'success');
+            renderResources();
+        } catch (e) {
+            alert(e.message);
+            const btn = document.getElementById('resSaveBtn');
+            if (btn) { btn.disabled = false; btn.textContent = 'Save changes'; }
+        }
+    }
+
+    async function deleteResource(id) {
+        const items = await apiV1Call('/learning/recommendations').catch(() => []);
+        const r = (items || []).find(x => x.id === id);
+        const label = r ? r.name : 'this recommendation';
+        const audience = r && r.visibility_scope && r.visibility_scope !== 'all'
+            ? `\nAudience: ${r.visibility_scope}` : '';
+        if (!window.confirm(`Remove "${label}" from the catalogue?${audience}\n\nIt will disappear from student portals immediately. This cannot be undone.`)) return;
+        try {
+            await apiV1Call(`/learning/recommendations/${id}`, { method: 'DELETE' });
+            showToast('Recommendation removed', 'success');
+            renderResources();
+        } catch (e) { showToast(e.message, 'error'); }
     }
 
     // ========================================
@@ -6913,6 +7025,9 @@ const Admin = (function() {
         confirmAssignment() {
             confirmAssignment();
         },
+        editResourceModal(id) { editResourceModal(id); },
+        confirmResourceEdit(id) { confirmResourceEdit(id); },
+        deleteResource(id) { deleteResource(id); },
         showResourceModal() {
             showResourceModal();
         },
