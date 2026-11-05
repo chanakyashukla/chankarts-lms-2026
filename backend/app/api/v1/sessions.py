@@ -665,6 +665,60 @@ async def complete_session(
     return _serialize(session)
 
 
+class ReopenSession(BaseModel):
+    reason: Optional[str] = None
+
+
+@router.post("/{session_id}/reopen")
+async def reopen_session(
+    session_id: UUID,
+    body: ReopenSession,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.INSTRUCTOR])),
+):
+    """Mark a completed session as uncompleted (undo).
+
+    Used when attendance/completion was recorded against the wrong class or
+    student. The session returns to `scheduled` so it can be edited (PATCH)
+    or re-completed correctly; completion details are cleared, history and
+    audit records are appended — never erased. Instructor payouts recompute
+    automatically because they only count completed sessions.
+    """
+    session = await _load_session_for_write(db, current_user, session_id)
+    if session.status != SessionStatus.COMPLETED:
+        raise HTTPException(status_code=409,
+                            detail="Only completed sessions can be marked uncompleted")
+    if current_user.role == UserRole.INSTRUCTOR:
+        instr = await get_instructor_for_user(db, current_user)
+        if not instr or session.instructor_id != instr.id:
+            raise HTTPException(status_code=403, detail="Not your assigned session")
+
+    previous = session.status
+    session.status = SessionStatus.SCHEDULED
+    session.actual_date = None
+    session.actual_start = None
+    session.actual_end = None
+    session.actual_duration_minutes = None
+    session.billing_month = None          # no longer attributed to a delivered month
+    session.updated_by = current_user.id
+
+    reason = (body.reason or "").strip() or "Completion undone — marked uncompleted"
+    await _record_history(db, session, previous, SessionStatus.SCHEDULED, current_user, reason)
+    await record_audit(
+        db,
+        action="session.reopened",
+        entity_type="class_session",
+        entity_id=str(session.id),
+        actor_user_id=current_user.id,
+        actor_role=current_user.role.value,
+        before_data={"status": previous},
+        after_data={"status": SessionStatus.SCHEDULED},
+        summary=f"Session un-completed (undo): {session.scheduled_date.isoformat()} — {reason}",
+    )
+    await db.flush()
+    return _serialize(session)
+
+
 @router.post("/{session_id}/flag-reschedule")
 async def flag_reschedule(
     session_id: UUID,

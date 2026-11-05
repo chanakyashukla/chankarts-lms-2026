@@ -740,6 +740,8 @@ const Portal = (function () {
                         facultyActions += '<button class="btn-p btn-p--sm btn-p--ghost" data-action="cancel-session" data-id="' + s.id + '">Cancel</button>';
                     } else if (s.status === 'rescheduling_required') {
                         facultyActions += '<button class="btn-p btn-p--sm btn-p--ghost" data-action="flag-session" data-id="' + s.id + '">Update Proposal</button>';
+                    } else if (s.status === 'completed') {
+                        facultyActions += '<button class="btn-p btn-p--sm btn-p--ghost" data-action="reopen-session" data-id="' + s.id + '">Mark uncompleted (undo)</button>';
                     }
                     facultyActions += '</div>' + (s.status === 'scheduled' ? policyNote : '');
                 } else if (s.status === 'scheduled') {
@@ -1776,6 +1778,7 @@ const Portal = (function () {
                 return;
             }
             if (action === 'complete-session') return completeSession(id);
+            if (action === 'reopen-session') return reopenSession(id);
             if (action === 'flag-session') return flagSession(id);
             if (action === 'cancel-session') return cancelSession(id);
             if (action === 'reschedule-session') return rescheduleSession(id);
@@ -1844,6 +1847,18 @@ const Portal = (function () {
             state.sessions = [];
             await refreshAll();
         });
+    }
+
+    async function reopenSession(id) {
+        if (!window.confirm('Mark this class as uncompleted?\n\nIt returns to Scheduled so you can edit it or record completion against the correct class/attendance. Completion details are cleared — the history is kept.')) return;
+        const reason = window.prompt('Reason (recorded in the audit trail):',
+            'Recorded against the wrong student') || '';
+        try {
+            await api('/sessions/' + id + '/reopen', { method: 'POST', body: JSON.stringify({ reason }) });
+            toast('Class marked uncompleted');
+            state.sessions = [];
+            await refreshAll();
+        } catch (e) { toast(e.message || 'Could not undo completion', 'error'); }
     }
 
     async function flagSession(id) {

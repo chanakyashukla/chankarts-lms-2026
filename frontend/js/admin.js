@@ -2659,6 +2659,19 @@ const Admin = (function() {
     // ========================================
     let attendanceStudentId = null;
 
+    async function reopenSession(id) {
+        if (!window.confirm('Mark this class as uncompleted?\n\nIt returns to Scheduled so it can be edited or re-recorded against the correct student/attendance. Completion details are cleared; history is preserved.')) return;
+        const reason = window.prompt('Reason (recorded in the audit trail):',
+            'Recorded against the wrong student') || '';
+        try {
+            await apiV1Call('/sessions/' + id + '/reopen', {
+                method: 'POST', body: JSON.stringify({ reason }),
+            });
+            showToast('Class marked uncompleted', 'success');
+            renderAttendance();
+        } catch (e) { showToast(e.message || 'Could not undo completion', 'error'); }
+    }
+
     async function renderAttendance() {
         const container = document.getElementById('adminContent');
         container.innerHTML = '<div class="admin-loading"><div class="admin-loading__spinner"></div>Loading attendance...</div>';
@@ -2719,6 +2732,7 @@ const Admin = (function() {
                                             <th>Faculty</th>
                                             <th>Status</th>
                                             <th>Topics covered</th>
+                                            <th></th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -2729,6 +2743,9 @@ const Admin = (function() {
                                                 <td>${escapeHtml(s.instructor_name || '—')}</td>
                                                 <td><span class="badge badge--${getStatusBadgeClass(s.status)}">${formatStatus(s.status)}</span></td>
                                                 <td>${escapeHtml(s.topics_covered || '—')}</td>
+                                                <td style="white-space:nowrap">${s.status === 'completed'
+                                                    ? `<button class="btn btn--secondary btn--sm" onclick="Admin.reopenSession('${s.id}')">Mark uncompleted</button>`
+                                                    : ''}</td>
                                             </tr>
                                     `).join('')}
                                 </tbody>
@@ -7026,6 +7043,7 @@ const Admin = (function() {
             confirmAssignment();
         },
         editResourceModal(id) { editResourceModal(id); },
+        reopenSession(id) { reopenSession(id); },
         confirmResourceEdit(id) { confirmResourceEdit(id); },
         deleteResource(id) { deleteResource(id); },
         showResourceModal() {
