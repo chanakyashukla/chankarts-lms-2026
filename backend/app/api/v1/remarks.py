@@ -20,6 +20,8 @@ from app.database import get_db
 from app.models.remark import StudentRemark, RemarkVisibility
 from app.models.student import Student
 from app.models.user import User
+from app.models.guardian import GuardianAccount
+from app.services.notifications import notify_user
 from app.services.access import (
     get_linked_student_ids,
     get_instructor_for_user,
@@ -110,6 +112,29 @@ async def create_remark(
         summary=f"visibility={remark.visibility}",
         after_data={"visibility": remark.visibility, "body": remark.body},
     )
+    # visible remarks notify their audience (staff-only remarks never notify)
+    if remark.visibility == "student_visible":
+        stu = (await db.execute(select(Student).where(Student.id == remark.student_id))).scalar_one_or_none()
+        if stu:
+            await notify_user(
+                db, user_id=stu.user_id, type="remark.added",
+                title="New remark from the Academy",
+                body=remark.body[:180],
+                dedupe_key=f"remark.created:{remark.id}:{stu.id}",
+                related_entity_type="student_remark", related_entity_id=remark.id,
+            )
+    elif remark.visibility == "parent_visible":
+        guids = (await db.execute(
+            select(GuardianAccount.user_id).where(GuardianAccount.student_id == remark.student_id)
+        )).scalars().all()
+        for uid in guids:
+            await notify_user(
+                db, user_id=uid, type="remark.added",
+                title="New remark about your student",
+                body=remark.body[:180],
+                dedupe_key=f"remark.created:{remark.id}:{uid}",
+                related_entity_type="student_remark", related_entity_id=remark.id,
+            )
     await db.commit()
     return _serialize_remark(remark)
 

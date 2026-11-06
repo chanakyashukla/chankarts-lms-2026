@@ -21,6 +21,7 @@ from app.core.roles import UserRole
 from app.database import get_db
 from app.models.achievement import Achievement
 from app.models.student import Student
+from app.services.notifications import notify_user
 from app.models.user import User
 from app.services.access import require_student_access
 from app.services.files import BASE_HOMEWORK_TYPES, safe_filename, save_upload, resolve_stored_file
@@ -181,6 +182,7 @@ async def admin_upload_certificate(
     a = (await db.execute(select(Achievement).where(Achievement.id == achievement_id))).scalar_one_or_none()
     if not a:
         raise HTTPException(status_code=404, detail="Achievement not found")
+    was_verified = bool(a.is_verified)
     stored_name, content_type, size, _ = await save_upload(
         file, subdir="achievements", allowed_types=BASE_HOMEWORK_TYPES
     )
@@ -203,6 +205,7 @@ async def admin_patch_achievement(
     a = (await db.execute(select(Achievement).where(Achievement.id == achievement_id))).scalar_one_or_none()
     if not a:
         raise HTTPException(status_code=404, detail="Achievement not found")
+    was_verified = bool(a.is_verified)
     for field in ("title", "category", "awarding_body", "programme_id", "grade_level",
                   "result", "description"):
         value = getattr(body, field)
@@ -216,4 +219,14 @@ async def admin_patch_achievement(
         a.is_archived = body.is_archived
     db.add(a)
     await db.flush()
+    if a.is_verified and not was_verified:
+        stu = (await db.execute(select(Student).where(Student.id == a.student_id))).scalar_one_or_none()
+        if stu:
+            await notify_user(
+                db, user_id=stu.user_id, type="achievement.published",
+                title=f"Achievement published: {a.title}",
+                body=(a.description or "Open your Achievements to view it.")[:180],
+                dedupe_key=f"achievement.verified:{a.id}:{stu.id}",
+                related_entity_type="achievement", related_entity_id=a.id,
+            )
     return _serialize(a)

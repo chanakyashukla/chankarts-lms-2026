@@ -32,6 +32,8 @@ from app.models.session import ClassSession
 from app.models.student import Student
 from app.models.syllabus import StudentSyllabusAssignment, StudentSyllabusProgress, Syllabus, SyllabusItem
 from app.models.user import User
+from app.models.guardian import GuardianAccount
+from app.services.notifications import notify_user
 from app.services.access import (
     get_instructor_for_user,
     get_linked_student_ids,
@@ -56,6 +58,63 @@ def _is_staff(user: User) -> bool:
 async def _require_staff(db: AsyncSession, user: User) -> None:
     if not _is_staff(user):
         raise HTTPException(status_code=403, detail="Faculty or admin access required")
+
+
+async def _notify_student(db, student_id, *, type: str, title: str, body: str = "",
+                          entity_type: str = None, entity_id=None) -> None:
+    """In-app notification for the student who owns this record (no-op if the
+    student is missing; never notifies staff actors)."""
+    if student_id is None:
+        return
+    st = (await db.execute(select(Student).where(Student.id == student_id))).scalar_one_or_none()
+    if st is None:
+        return
+    await notify_user(
+        db, user_id=st.user_id, type=type, title=title, body=body,
+        # include the recipient: the same entity can notify several students
+        dedupe_key=f"{type}:{entity_id}:{student_id}" if entity_id is not None else None,
+        related_entity_type=entity_type,
+        related_entity_id=entity_id,
+    )
+
+
+async def _notify_guardians(db, student_id, *, type: str, title: str, body: str = "",
+                            entity_type: str = None, entity_id=None) -> None:
+    """Parent-visible records notify every guardian account linked to the student."""
+    if student_id is None:
+        return
+    uids = (await db.execute(
+        select(GuardianAccount.user_id).where(GuardianAccount.student_id == student_id))).scalars().all()
+    for uid in uids:
+        await notify_user(
+            db, user_id=uid, type=type, title=title, body=body,
+            dedupe_key=f"{type}:{entity_id}:{uid}" if entity_id is not None else None,
+            related_entity_type=entity_type, related_entity_id=entity_id,
+        )
+
+
+async def _notify_recommendation_audience(db, rec, *, action: str) -> None:
+    """Notify every active student whose audience matches this resource."""
+    students = (await db.execute(select(Student).where(Student.status == "active"))).scalars().all()
+    version = rec.updated_at or rec.created_at
+    for st in students:
+        try:
+            ok = await _audience_allows(
+                db, kind="recommendation", resource_id=rec.id,
+                scope=rec.visibility_scope or "all",
+                programme_id=rec.programme_id, level=None, student_ids=[st.id])
+        except Exception:
+            ok = False
+        if not ok:
+            continue
+        ver = f":{version.isoformat()}" if (action == "updated" and version) else ""
+        await notify_user(
+            db, user_id=st.user_id, type=f"resource.{action}",
+            title=f"{'New' if action == 'added' else 'Updated'} resource: {rec.name}",
+            body=(rec.description or "Open the Resources section to view it.")[:180],
+            dedupe_key=f"resource.{action}:{rec.id}:{st.id}{ver}",
+            related_entity_type="recommendation", related_entity_id=rec.id,
+        )
 
 
 async def _accessible_student_ids(db: AsyncSession, user: User) -> Optional[List[UUID]]:
@@ -222,6 +281,11 @@ async def create_assignment(
         actor_role=current_user.role.value,
         after_data={"title": body.title, "student_id": str(enrollment.student_id)},
     )
+    await _notify_student(
+        db, enrollment.student_id, type="assignment.created",
+        title=f"New assignment: {assignment.title}",
+        body=(assignment.instructions or "Open your Assignments section for details.")[:180],
+        entity_type="assignment", entity_id=assignment.id)
     return _serialize_assignment(assignment)
 
 
@@ -350,6 +414,11 @@ async def review_submission(
     if assignment:
         assignment.status = body.status
     await db.flush()
+    await _notify_student(
+        db, submission.student_id, type="assignment.reviewed",
+        title=f"Assignment reviewed — {submission.status.replace('_', ' ').title()}",
+        body=(submission.feedback or "Your submission has been reviewed.")[:180],
+        entity_type="submission", entity_id=submission.id)
     return {"submission_id": str(submission.id), "status": submission.status}
 
 
@@ -658,11 +727,11 @@ async def assign_material(
     student_id = body.get("student_id")
     if not student_id:
         raise HTTPException(status_code=400, detail="student_id is required")
-    material_result = await db.execute(select(StudyMaterial).where(StudyMaterial.id == material_id))
-    if not material_result.scalar_one_or_none():
+    material = (await db.execute(select(StudyMaterial).where(StudyMaterial.id == material_id))).scalar_one_or_none()
+    if not material:
         raise HTTPException(status_code=404, detail="Material not found")
-    student_result = await db.execute(select(Student).where(Student.id == UUID(student_id)))
-    if not student_result.scalar_one_or_none():
+    student = (await db.execute(select(Student).where(Student.id == UUID(student_id)))).scalar_one_or_none()
+    if not student:
         raise HTTPException(status_code=404, detail="Student not found")
 
     row = MaterialAssignment(
@@ -684,6 +753,11 @@ async def assign_material(
             resource_kind="material", resource_id=material_id,
             student_id=UUID(student_id), created_by=current_user.id))
     await db.flush()
+    await _notify_student(
+        db, student.id, type="material.assigned",
+        title=f"Study material assigned: {material.title}",
+        body=(material.description or "Open your Study Material section to view it.")[:180],
+        entity_type="material", entity_id=material.id)
     return {"id": str(row.id)}
 
 
@@ -1239,6 +1313,12 @@ async def assign_syllabus_to_student(
                 existing.instructor_id = body.instructor_id
             db.add(existing)
             await db.flush()
+            syl = (await db.execute(select(Syllabus).where(Syllabus.id == syllabus_id))).scalar_one_or_none()
+            await _notify_student(
+                db, body.student_id, type="syllabus.assigned",
+                title=f"Syllabus assigned: {syl.title if syl else 'learning plan'}",
+                body="Open Syllabus & Progress to see your plan.",
+                entity_type="student_syllabus_assignment", entity_id=existing.id)
             return {"id": str(existing.id), "status": "active", "reactivated": True}
         raise HTTPException(status_code=409, detail="This syllabus is already assigned to that student/enrolment")
 
@@ -1252,6 +1332,12 @@ async def assign_syllabus_to_student(
     )
     db.add(assignment)
     await db.flush()
+    syl = (await db.execute(select(Syllabus).where(Syllabus.id == syllabus_id))).scalar_one_or_none()
+    await _notify_student(
+        db, body.student_id, type="syllabus.assigned",
+        title=f"Syllabus assigned: {syl.title if syl else 'learning plan'}",
+        body="Open Syllabus & Progress to see your plan.",
+        entity_type="student_syllabus_assignment", entity_id=assignment.id)
     return {"id": str(assignment.id), "status": "active", "reactivated": False}
 
 
@@ -1515,6 +1601,11 @@ async def create_exam(
     )
     db.add(exam)
     await db.flush()
+    await _notify_student(
+        db, exam.student_id, type="exam.added",
+        title=f"Exam added: {exam.board.title()} {exam.instrument}",
+        body=(exam.notes or "Open Exams & Milestones for deadlines and details.")[:180],
+        entity_type="exam", entity_id=exam.id)
     return _serialize_exam(exam, [])
 
 
@@ -1532,6 +1623,7 @@ async def update_exam(
         raise HTTPException(status_code=404, detail="Exam not found")
 
     data = body.model_dump(exclude_unset=True)
+    prev_result = exam.result
     for date_field in ("exam_window_start", "exam_window_end", "submission_deadline"):
         if date_field in data and data[date_field]:
             data[date_field] = dt.date.fromisoformat(data[date_field])
@@ -1544,6 +1636,12 @@ async def update_exam(
         setattr(exam, field, value)
     await db.flush()
     items = await db.execute(select(ExamItem).where(ExamItem.exam_id == exam.id))
+    if exam.result and exam.result != prev_result:
+        await _notify_student(
+            db, exam.student_id, type="exam.result",
+            title=f"Exam result updated: {exam.result}",
+            body=f"{exam.board.title()} {exam.instrument} — result: {exam.result}",
+            entity_type="exam", entity_id=exam.id)
     return _serialize_exam(exam, list(items.scalars().all()))
 
 
@@ -1606,6 +1704,11 @@ async def create_milestone(
     )
     db.add(milestone)
     await db.flush()
+    await _notify_student(
+        db, milestone.student_id, type="milestone.added",
+        title=f"Milestone added: {milestone.title}",
+        body=(milestone.description or "Open Exams & Milestones to view it.")[:180],
+        entity_type="milestone", entity_id=milestone.id)
     return {"id": str(milestone.id), "title": milestone.title}
 
 
@@ -1745,6 +1848,7 @@ async def create_recommendation(
             created_by=current_user.id))
         targets += 1
     await db.flush()
+    await _notify_recommendation_audience(db, row, action="added")
     return {"id": str(row.id), "name": row.name, "visibility_scope": scope,
             "target_students": targets}
 
@@ -1815,6 +1919,7 @@ async def update_recommendation(
                 + (" (hidden)" if not row.is_active else "")
                 + (f"; audience targets={targets_replaced}" if targets_replaced is not None else ""),
     )
+    await _notify_recommendation_audience(db, row, action="updated")
     return {"ok": True, "id": str(row.id), "name": row.name,
             "is_active": bool(row.is_active),
             "visibility_scope": row.visibility_scope or "all",
@@ -1886,6 +1991,16 @@ async def patch_material(
                 resource_kind="material", resource_id=m.id, student_id=sid,
                 created_by=current_user.id))
     await db.flush()
+    assigned_sids = (await db.execute(
+        select(MaterialAssignment.student_id).where(MaterialAssignment.material_id == m.id)
+    )).scalars().all()
+    version = m.updated_at.isoformat() if m.updated_at else ""
+    for sid in assigned_sids:
+        await _notify_student(
+            db, sid, type="material.updated",
+            title=f"Study material updated: {m.title}",
+            body=(m.description or "Open your Study Material section to view changes.")[:180],
+            entity_type="material", entity_id=f"{m.id}:{version}")
     return {"id": str(m.id), "visibility_scope": m.visibility_scope or "all",
             "is_published": bool(m.is_published)}
 
