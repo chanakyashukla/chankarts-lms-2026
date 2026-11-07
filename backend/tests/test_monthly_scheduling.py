@@ -283,3 +283,72 @@ async def test_validation_errors(client, admin_user):
     r = await client.post(f"/api/v1/admin/students/{sid2}/monthly-schedule",
                           json={"month": MONTH, "classes": _slots(["2026-11-02"])}, headers=h)
     assert r.status_code == 400 and "enrolment" in r.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Plan cap: a 4-class cycle takes the earliest occurrences only; the extra
+# weekday occurrence (e.g. a 5th Sunday) stays free for rescheduled classes.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_four_class_plan_cap_blocks_fifth_pattern_class(client, admin_user):
+    h = auth(admin_user)
+    inst = await _mk_instructor("capins")
+    sid, eid = await _mk_student("capstu", inst)
+
+    days = ["2026-12-02", "2026-12-09", "2026-12-16", "2026-12-23"]   # earliest four
+    r = await client.post(f"/api/v1/admin/students/{sid}/monthly-schedule",
+                          json={"month": "2026-12", "classes": _slots(days)}, headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["month_total"] == 4 and r.json()["plan_cap"] == 4
+
+    # a fifth pattern class in the same month is refused with a clear message
+    r = await client.post(f"/api/v1/admin/students/{sid}/monthly-schedule",
+                          json={"month": "2026-12", "classes": _slots(["2026-12-30"])}, headers=h)
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert detail["plan_cap"] == 4 and detail["projected"] == 5
+    assert "kept for rescheduled" in detail["message"] and "leave that occurrence free" in detail["message"]
+
+    m = await client.get(f"/api/v1/admin/students/{sid}/monthly-schedule?month=2026-12", headers=h)
+    assert m.json()["scheduled_total"] == 4 and m.json()["over_plan"] is False
+    assert m.json()["plan_cap"] == 4
+
+
+@pytest.mark.asyncio
+async def test_plan_without_cap_allows_any_count(client, admin_user):
+    h = auth(admin_user)
+    inst = await _mk_instructor("nocapins")
+    sid, eid = await _mk_student("nocapstu", inst, fee_plan=None)   # no package → no cap
+    days = ["2026-12-01", "2026-12-08", "2026-12-15", "2026-12-22", "2026-12-29"]
+    r = await client.post(f"/api/v1/admin/students/{sid}/monthly-schedule",
+                          json={"month": "2026-12", "classes": _slots(days)}, headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["month_total"] == 5 and r.json()["plan_cap"] is None
+    m = await client.get(f"/api/v1/admin/students/{sid}/monthly-schedule?month=2026-12", headers=h)
+    assert m.json()["over_plan"] is False          # no plan → nothing to exceed
+
+
+@pytest.mark.asyncio
+async def test_existing_over_plan_is_flagged_and_reschedule_not_capped(client, admin_user):
+    h = auth(admin_user)
+    inst = await _mk_instructor("overins")
+    sid, eid = await _mk_student("overstu", inst)
+    # four pattern classes…
+    days = ["2026-12-02", "2026-12-09", "2026-12-16", "2026-12-23"]
+    r = await client.post(f"/api/v1/admin/students/{sid}/monthly-schedule",
+                          json={"month": "2026-12", "classes": _slots(days)}, headers=h)
+    assert r.status_code == 200
+    # …plus a fifth session placed directly (e.g. historical/imported data)
+    fifth = await _mk_session(sid, eid, inst, date(2026, 12, 6), time(10, 0), time(11, 0))
+    m = await client.get(f"/api/v1/admin/students/{sid}/monthly-schedule?month=2026-12", headers=h)
+    assert m.json()["scheduled_total"] == 5 and m.json()["over_plan"] is True
+
+    # a make-up class arriving through the RE-SCHEDULE flow is NOT capped:
+    # move the fifth session within the month (far future → passes24h policy)
+    r = await client.post(f"/api/v1/sessions/{fifth}/reschedule",
+                          json={"new_date": "2026-12-07", "new_start": "11:00",
+                                "new_end": "12:00", "reason": "illness makeup"},
+                          headers=h)
+    assert r.status_code in (200, 201), r.text
+    m = await client.get(f"/api/v1/admin/students/{sid}/monthly-schedule?month=2026-12", headers=h)
+    assert m.json()["scheduled_total"] == 5       # still allowed after reschedule

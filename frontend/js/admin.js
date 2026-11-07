@@ -4077,13 +4077,23 @@ const Admin = (function() {
                 <span>Remaining: <b>${remaining != null ? remaining : '—'}</b></span>
                 <button class="btn btn--secondary btn--sm" onclick="Admin.wsMonthlyReload()">Refresh</button>
             </div>
+            ${(monthly && monthly.over_plan) ? `
+            <div style="border:1px solid var(--color-warning);border-radius:8px;padding:8px 10px;margin-bottom:10px;color:var(--color-warning);font-size:0.8rem">
+                ⚠ <b>${monthly.scheduled_total} classes scheduled vs plan ${monthly.plan_cap}</b> — extra weekday
+                occurrences are not part of the cycle. Only the first ${monthly.plan_cap} count as this month's plan;
+                the extra slot stays <b>free for rescheduled / make-up classes</b> (illness, holidays). Pattern
+                scheduling is capped at ${monthly.plan_cap} — use <b>Move this class…</b> to fill the free slot.
+            </div>` : ''}
             ${monthly && monthly.existing_conflicts && monthly.existing_conflicts.length
                 ? `<div style="color:var(--color-warning);font-size:0.85rem;margin-bottom:8px">${monthly.existing_conflicts.map(c => '⚠ ' + escapeHtml(c.message)).join('<br>')}</div>` : ''}
-            ${monthSessions.length ? `<table class="admin-table" style="margin-bottom:14px"><thead><tr><th>Date</th><th>Time</th><th>Status</th><th>Counts</th></tr></thead><tbody>
+            ${monthSessions.length ? `<table class="admin-table" style="margin-bottom:14px"><thead><tr><th>Date</th><th>Time</th><th>Status</th><th>Counts</th><th></th></tr></thead><tbody>
                 ${monthSessions.map(x => `<tr style="${x.status === 'completed' ? 'opacity:0.65' : ''}">
                     <td>${formatDate(x.date)}</td><td>${(x.start || '').slice(0,5)}–${(x.end || '').slice(0,5)}</td>
                     <td><span class="badge badge--${getStatusBadgeClass(x.status)}">${formatStatus(x.status)}</span></td>
-                    <td>${x.counts ? '✓' : '—'}</td></tr>`).join('')}
+                    <td>${x.counts ? '✓' : '—'}</td>
+                    <td style="white-space:nowrap">${x.status === 'scheduled'
+                        ? `<button class="btn btn--secondary btn--sm" onclick="Admin.moveSession('${x.id}')">Move this class…</button>`
+                        : ''}</td></tr>`).join('')}
                 </tbody></table>`
                 : '<p class="admin-empty__text" style="margin-bottom:10px">No classes scheduled for this month yet</p>'}
             <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0">

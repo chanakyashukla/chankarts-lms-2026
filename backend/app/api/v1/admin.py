@@ -1798,7 +1798,7 @@ async def admin_monthly_schedule(
                 "instructor_id": str(s.instructor_id) if s.instructor_id else None,
                 "counts": bool(s.counts_toward_package)}
 
-    active = [s for s in sessions if s.status != "cancelled"]
+    active = [s for s in sessions if s.status not in ("cancelled", "rescheduled")]
     counts = {
         "scheduled": sum(1 for s in active if s.status in ("scheduled", "rescheduled")),
         "completed": sum(1 for s in active if s.status == "completed"),
@@ -1831,6 +1831,8 @@ async def admin_monthly_schedule(
         "counts": counts,
         "scheduled_total": len(active),
         "remaining": remaining,
+        "plan_cap": expected,
+        "over_plan": bool(expected and len(active) > expected),
         "existing_conflicts": existing_conflicts,
     }
 
@@ -1909,13 +1911,13 @@ async def admin_save_monthly_schedule(
         select(ClassSession).where(ClassSession.student_id == student_id,
                                    ClassSession.scheduled_date >= first,
                                    ClassSession.scheduled_date <= last,
-                                   ClassSession.status != "cancelled"))).scalars().all()
+                                   ClassSession.status.notin_(("cancelled", "rescheduled"))))).scalars().all()
     inst_ids = {p[3] for p in parsed if p[3]}
     instr_sessions = (await db.execute(
         select(ClassSession).where(ClassSession.instructor_id.in_(list(inst_ids)),
                                    ClassSession.scheduled_date >= first,
                                    ClassSession.scheduled_date <= last,
-                                   ClassSession.status != "cancelled"))).scalars().all() if inst_ids else []
+                                   ClassSession.status.notin_(("cancelled", "rescheduled"))))).scalars().all() if inst_ids else []
     # weekly timetables: this student's + the involved instructors'
     student_enr_ids = [e.id for e in (await db.execute(
         select(Enrollment).where(Enrollment.student_id == student_id))).scalars().all()]
@@ -1984,6 +1986,30 @@ async def admin_save_monthly_schedule(
             "conflicts": conflicts,
         })
 
+    # ---- plan cap: at most the package's classes per month ----
+    # Extra weekday occurrences (e.g. a 5th Sunday) stay FREE so they can be
+    # used later for rescheduled/make-up classes — pattern scheduling never
+    # auto-fills them. Reschedule/Move flows are intentionally not capped.
+    cap = _expected_classes(enrollment.fee_plan)
+    if cap:
+        active_now = (await db.execute(
+            select(func.count(ClassSession.id)).where(
+                ClassSession.student_id == student.id,
+                ClassSession.scheduled_date >= first, ClassSession.scheduled_date <= last,
+                ClassSession.status.notin_(("cancelled", "rescheduled"))))).scalar() or 0
+        projected = active_now + len(to_insert)
+        if projected > cap:
+            extra = projected - cap
+            raise HTTPException(status_code=400, detail={
+                "message": f"{cap}-class plan: {active_now} class(es) already scheduled in {body.month} "
+                           f"and this save adds {len(to_insert)} (total {projected}). "
+                           f"{extra} slot(s) over the plan — remove the extra date(s) and leave that "
+                           f"occurrence free; it is kept for rescheduled/make-up classes (use Move on an "
+                           f"existing class for illness/holiday changes).",
+                "plan_cap": cap, "scheduled_now": active_now,
+                "adding": len(to_insert), "projected": projected,
+            })
+
     # ---- insert (children of this student only; completed sessions untouched) ----
     created_rows = []
     for d, s_t, e_t, inst in to_insert:
@@ -2002,7 +2028,7 @@ async def admin_save_monthly_schedule(
         select(func.count(ClassSession.id)).where(
             ClassSession.student_id == student_id,
             ClassSession.scheduled_date >= first, ClassSession.scheduled_date <= last,
-            ClassSession.status != "cancelled"))).scalar() or 0
+            ClassSession.status.notin_(("cancelled", "rescheduled"))))).scalar() or 0
     expected = _expected_classes(enrollment.fee_plan)
     remaining = max((expected or 0) - active_after, 0) if expected else None
 
@@ -2014,6 +2040,7 @@ async def admin_save_monthly_schedule(
                 f"{f'/{expected}' if expected else ''})",
     )
     return {
+        "plan_cap": cap,
         "scheduled": [{"date": r.scheduled_date.isoformat(),
                        "start": r.scheduled_start.strftime("%H:%M"),
                        "end": r.scheduled_end.strftime("%H:%M"),
@@ -2060,7 +2087,7 @@ async def _slot_conflict_list(db: AsyncSession, student_id: UUID, instructor_id:
                 select(ClassSession).where(
                     ClassSession.instructor_id == instructor_id,
                     ClassSession.scheduled_date == d,
-                    ClassSession.status != "cancelled"))).scalars().all():
+                    ClassSession.status.notin_(("cancelled", "rescheduled"))))).scalars().all():
             if isess.id in exclude_session_ids:
                 continue
             if _slot_overlaps(s_t, e_t, isess.scheduled_start, isess.scheduled_end):
@@ -2088,7 +2115,7 @@ async def _slot_conflict_list(db: AsyncSession, student_id: UUID, instructor_id:
                 select(ClassSession).where(
                     ClassSession.student_id == student_id,
                     ClassSession.scheduled_date == d,
-                    ClassSession.status != "cancelled"))).scalars().all():
+                    ClassSession.status.notin_(("cancelled", "rescheduled"))))).scalars().all():
             if ss.id in exclude_session_ids:
                 continue
             if _slot_overlaps(s_t, e_t, ss.scheduled_start, ss.scheduled_end):
@@ -2131,7 +2158,7 @@ async def _travel_status(db: AsyncSession, instructor, d: date, s_t: dtime, e_t:
         select(ClassSession).where(
             ClassSession.instructor_id == instructor.id,
             ClassSession.scheduled_date == d,
-            ClassSession.status != "cancelled"))).scalars().all()
+            ClassSession.status.notin_(("cancelled", "rescheduled"))))).scalars().all()
     prev_end, next_start, prev, nxt = None, None, None, None
     for n in neighbours:
         if n.id in exclude_session_ids:
@@ -2283,7 +2310,7 @@ async def _compute_recurring_change(db: AsyncSession, student, enrollment, body:
             select(ClassSession).where(
                 ClassSession.student_id == student.id,
                 ClassSession.scheduled_date == new_date,
-                ClassSession.status != "cancelled"))).scalars().all()
+                ClassSession.status.notin_(("cancelled", "rescheduled"))))).scalars().all()
         dup_hit = any(x.id != sess.id and _slot_overlaps(nst, nen, x.scheduled_start, x.scheduled_end) for x in dup)
         conflicts = await _slot_conflict_list(
             db, student.id, instructor_id, new_date, nst, nen,
