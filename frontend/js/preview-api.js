@@ -464,6 +464,21 @@
         if (isChangePin && method === 'POST') return changePin(user, body);
         if (P === '/auth/me') return json({ id: user.id, username: user.username, email: user.email, role: user.role, is_active: user.is_active, created_at: user.created_at });
 
+        // ---- onboarding / guided-tour state (self-scoped) ----
+        if (P === '/onboarding') {
+            if (method === 'GET') return json(user.onboarding || { version: '2026-11-09', shown: false, started: false, completed: false, skipped: false, progress: null, updated_at: null });
+            if (method === 'PUT') {
+                var ob = user.onboarding || { version: '2026-11-09', shown: false, started: false, completed: false, skipped: false, progress: null, updated_at: null };
+                ['version', 'shown', 'started', 'completed', 'skipped', 'progress'].forEach(function (k) {
+                    if (Object.prototype.hasOwnProperty.call(body, k)) ob[k] = body[k];
+                });
+                ob.updated_at = new Date().toISOString();
+                user.onboarding = ob;
+                save(DB);
+                return json(ob);
+            }
+        }
+
         // ---- portal (role-scoped) ----
         if (P === '/portal/me') return portalMe(user);
         if (P === '/portal/dashboard') return portalDashboard(user, q);

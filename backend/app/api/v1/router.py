@@ -13,6 +13,7 @@ from app.api.v1 import (
     portal,
     learning,
     remarks,
+    onboarding,
 )
 
 api_router = APIRouter()
@@ -32,3 +33,4 @@ api_router.include_router(support.portal_router, prefix="/portal", tags=["suppor
 api_router.include_router(support.admin_router, prefix="/admin", tags=["support"])
 api_router.include_router(achievements.portal_router, prefix="/portal", tags=["achievements"])
 api_router.include_router(achievements.admin_router, prefix="/admin", tags=["achievements"])
+api_router.include_router(onboarding.router, prefix="/onboarding", tags=["onboarding"])

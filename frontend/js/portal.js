@@ -1442,7 +1442,13 @@ const Portal = (function () {
                 '</div>';
         }).join('');
 
-        return '<div class="grid grid--2">' +
+        // Getting Started / Guided Tutorials — replayable tours + written help
+        const tourCentre = (typeof Tours !== 'undefined' && Tours && typeof Tours.helpCentreHtml === 'function')
+            ? Tours.helpCentreHtml()
+            : '';
+
+        return tourCentre +
+            '<div class="grid grid--2">' +
             '<div class="card"><h3 class="card__title" style="margin-bottom:10px">Help & Support</h3>' +
             '<p style="font-size:13.5px;color:var(--text-2);line-height:1.6">' +
             'Questions about classes, fees, or the portal? Reach the academy:</p>' +
@@ -1797,6 +1803,8 @@ const Portal = (function () {
             if (action === 'send-support') return sendSupport();
             if (action === 'open-support') return openSupportThread(id);
             if (action === 'reply-support') return replySupport(id);
+            if (action === 'tour-replay') return Tours.startFullTour();
+            if (action === 'tour-topic') return Tours.startTopic(id);
             if (action === 'new-report') return newReportModal();
             if (action === 'edit-report') return editReportModal(id);
             if (action === 'submit-report') return submitReport(id);
@@ -2500,6 +2508,12 @@ const Portal = (function () {
                     render();
                 }
             });
+        }
+
+        // First-login introduction: only after the portal has rendered (and,
+        // via Pages.portal, after any mandatory PIN change) — see tours.js.
+        if (typeof Tours !== 'undefined' && Tours && typeof Tours.maybeAutoLaunch === 'function') {
+            try { Tours.maybeAutoLaunch(); } catch (e) { console.warn('[tour] auto-launch failed', e); }
         }
     }
 

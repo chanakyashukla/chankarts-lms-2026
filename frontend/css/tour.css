@@ -1,0 +1,255 @@
+/* ChankArts — guided-tour overlay, spotlight, bubbles, welcome intro and
+ * Help & Support tutorial centre. Loaded after portal.css. */
+
+/* ---------------------------------------------------------------- */
+/* Tour root: overlay + spotlight + bubble                            */
+/* ---------------------------------------------------------------- */
+.tour-root {
+    position: fixed;
+    inset: 0;
+    z-index: 1200;
+    pointer-events: none; /* only the bubble accepts clicks */
+}
+
+.tour-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(16, 17, 15, 0.62);
+    pointer-events: auto; /* block clicks on the page beneath */
+}
+
+.tour-spotlight {
+    position: fixed;
+    z-index: 1201;
+    border-radius: var(--r-md, 12px);
+    box-shadow: 0 0 0 9999px rgba(16, 17, 15, 0.0); /* hole is the element itself */
+    outline: 3px solid var(--gold-bright, #D5B15E);
+    outline-offset: 2px;
+    pointer-events: none;
+    transition: top 0.18s ease, left 0.18s ease, width 0.18s ease, height 0.18s ease;
+    display: none;
+}
+
+.tour-bubble {
+    position: fixed;
+    z-index: 1202;
+    width: min(360px, calc(100vw - 24px));
+    background: var(--paper, #fff);
+    color: var(--text, #171815);
+    border: 1px solid var(--line, #E7DFD0);
+    border-radius: var(--r-lg, 16px);
+    box-shadow: var(--shadow-lg, 0 18px 44px rgba(16, 17, 15, 0.28));
+    padding: 16px 18px 14px;
+    pointer-events: auto;
+    outline: none;
+}
+
+.tour-bubble[data-placement="above"]::after,
+.tour-bubble[data-placement="below"]::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 8px solid transparent;
+}
+.tour-bubble[data-placement="below"]::after {
+    top: -16px;
+    border-bottom-color: var(--paper, #fff);
+}
+.tour-bubble[data-placement="above"]::after {
+    bottom: -16px;
+    border-top-color: var(--paper, #fff);
+}
+
+.tour-bubble__progress {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--gold, #B58A35);
+    margin-bottom: 6px;
+}
+
+.tour-bubble__title {
+    font-family: var(--font-display, 'Playfair Display', Georgia, serif);
+    font-size: 17px;
+    line-height: 1.3;
+    margin: 0 0 6px;
+    color: var(--text, #171815);
+}
+
+.tour-bubble__text {
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--text-2, #706B60);
+    margin: 0 0 14px;
+    white-space: normal;
+}
+
+.tour-bubble__controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.tour-btn {
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 8px 14px;
+    border-radius: var(--r-pill, 999px);
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+}
+.tour-btn:focus-visible {
+    outline: 2px solid var(--gold, #B58A35);
+    outline-offset: 2px;
+}
+.tour-btn--primary {
+    margin-left: auto;
+    background: linear-gradient(135deg, var(--gold, #B58A35), var(--gold-bright, #D5B15E));
+    color: #171815;
+    box-shadow: var(--shadow-gold, 0 10px 26px rgba(181, 138, 53, 0.28));
+}
+.tour-btn--primary:hover { filter: brightness(1.05); }
+.tour-btn--ghost {
+    background: transparent;
+    color: var(--text-2, #706B60);
+    border-color: var(--line, #E7DFD0);
+}
+.tour-btn--ghost:hover { background: var(--ivory, #FAF7F0); }
+.tour-btn:disabled { opacity: 0.4; cursor: default; }
+.tour-btn--ghost[data-tour="skip"] { margin-left: 4px; }
+
+/* ---------------------------------------------------------------- */
+/* Welcome introduction modal                                         */
+/* ---------------------------------------------------------------- */
+.tour-welcome-root {
+    position: fixed;
+    inset: 0;
+    z-index: 1300;
+    background: rgba(16, 17, 15, 0.66);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+
+.tour-welcome {
+    background: var(--paper, #fff);
+    border-radius: var(--r-xl, 22px);
+    box-shadow: var(--shadow-lg, 0 18px 44px rgba(16, 17, 15, 0.3));
+    max-width: 460px;
+    width: 100%;
+    padding: 32px 28px 26px;
+    text-align: center;
+    border-top: 4px solid var(--gold, #B58A35);
+    animation: tourWelcomeIn 0.28s ease;
+}
+
+@keyframes tourWelcomeIn {
+    from { opacity: 0; transform: translateY(14px) scale(0.98); }
+    to { opacity: 1; transform: none; }
+}
+
+.tour-welcome__badge {
+    width: 56px;
+    height: 56px;
+    margin: 0 auto 14px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--gold, #B58A35), var(--gold-bright, #D5B15E));
+    color: #171815;
+    font-size: 28px;
+    line-height: 56px;
+    font-family: var(--font-display, Georgia, serif);
+    box-shadow: var(--shadow-gold, 0 10px 26px rgba(181, 138, 53, 0.28));
+}
+
+.tour-welcome__title {
+    font-family: var(--font-display, 'Playfair Display', Georgia, serif);
+    font-size: 22px;
+    line-height: 1.3;
+    margin: 0 0 10px;
+    color: var(--text, #171815);
+}
+
+.tour-welcome__body {
+    font-size: 14.5px;
+    line-height: 1.6;
+    color: var(--text-2, #706B60);
+    margin: 0 0 22px;
+}
+
+.tour-welcome__actions {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.tour-welcome__actions .btn-p { width: 100%; }
+
+/* ---------------------------------------------------------------- */
+/* Help & Support — Getting Started / Guided Tutorials               */
+/* ---------------------------------------------------------------- */
+.tour-centre__topics {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.tour-centre__faq-title {
+    font-family: var(--font-display, 'Playfair Display', Georgia, serif);
+    font-size: 15px;
+    margin: 16px 0 8px;
+    color: var(--text, #171815);
+}
+
+.tour-faq {
+    border: 1px solid var(--line, #E7DFD0);
+    border-radius: var(--r-sm, 8px);
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    background: var(--ivory, #FAF7F0);
+}
+.tour-faq summary {
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 13.5px;
+    color: var(--text, #171815);
+    list-style: none;
+}
+.tour-faq summary::-webkit-details-marker { display: none; }
+.tour-faq summary::before {
+    content: "▸ ";
+    color: var(--gold, #B58A35);
+}
+.tour-faq[open] summary::before { content: "▾ "; }
+.tour-faq p {
+    margin: 8px 0 2px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-2, #706B60);
+}
+
+/* ---------------------------------------------------------------- */
+/* Responsive                                                        */
+/* ---------------------------------------------------------------- */
+@media (max-width: 560px) {
+    .tour-bubble {
+        width: calc(100vw - 20px);
+        padding: 14px 14px 12px;
+    }
+    .tour-bubble__title { font-size: 16px; }
+    .tour-bubble__text { font-size: 13px; }
+    .tour-bubble__controls { gap: 6px; }
+    .tour-btn { padding: 10px 14px; min-height: 40px; } /* easy to tap */
+    .tour-welcome { padding: 26px 18px 20px; }
+    .tour-welcome__title { font-size: 19px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tour-spotlight { transition: none; }
+    .tour-welcome { animation: none; }
+}

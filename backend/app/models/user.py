@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Enum, Boolean
+from sqlalchemy import Column, String, DateTime, Enum, Boolean, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -18,6 +18,10 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     # Forced 4-digit PIN change on first login (provisioned temp PINs)
     must_change_pin = Column(Boolean, default=False)
+    # Interactive guided-tour / onboarding state (server-side source of truth;
+    # never localStorage). Shape: {version, shown, started, completed, skipped,
+    # progress: {step, tour}, updated_at}. Additive & nullable.
+    onboarding = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
