@@ -6,7 +6,11 @@
     <meta name="description" content="ChankArts Music Academy - Learn. Create. Perform. A professional music learning platform for students and instructors.">
     <meta name="theme-color" content="#1a1a2e">
     <title>ChankArts Music Academy</title>
-    <script src="js/preview-api.js"></script>
+    <!-- Preview/demo data adapter. Loaded AFTER the base-path snippet below
+         so it resolves against the app's mount point on deep links too
+         (e.g. /portal/achievements would otherwise request /portal/js/...).
+         ?v= bumps whenever the demo seed changes so returning visitors
+         always receive the current records. -->
     <script>
         /* Detect the mount point (base path) before any stylesheet loads so
            relative css/js/asset URLs resolve correctly on every route,
@@ -24,6 +28,7 @@
             document.head.insertBefore(el, document.head.firstChild);
         })();
     </script>
+    <script src="js/preview-api.js?v=7"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -89,9 +94,10 @@
         </footer>
     </div>
 
-    <script src="js/app.js"></script>
-    <script src="js/admin.js"></script>
-    <script src="js/portal.js"></script>
+    <!-- ?v= bumps with each change so browsers never run a stale copy -->
+    <script src="js/app.js?v=2"></script>
+    <script src="js/admin.js?v=3"></script>
+    <script src="js/portal.js?v=5"></script>
     <script src="js/tour-engine.js"></script>
     <script src="js/tours.js"></script>
 </body>

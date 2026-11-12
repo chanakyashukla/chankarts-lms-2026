@@ -1586,6 +1586,7 @@ async def create_exam(
     current_user: User = Depends(get_current_user),
 ):
     await _require_staff(db, current_user)
+    await require_student_access(db, current_user, body.student_id)   # instructors: assigned students only
     exam = Exam(
         student_id=body.student_id,
         enrollment_id=body.enrollment_id,
@@ -1621,6 +1622,7 @@ async def update_exam(
     exam = result.scalar_one_or_none()
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
+    await require_student_access(db, current_user, exam.student_id)   # instructors: assigned students only
 
     data = body.model_dump(exclude_unset=True)
     prev_result = exam.result
@@ -1693,6 +1695,7 @@ async def create_milestone(
     current_user: User = Depends(get_current_user),
 ):
     await _require_staff(db, current_user)
+    await require_student_access(db, current_user, body.student_id)   # instructors: assigned students only
     milestone = Milestone(
         student_id=body.student_id,
         enrollment_id=body.enrollment_id,
@@ -1710,6 +1713,54 @@ async def create_milestone(
         body=(milestone.description or "Open Exams & Milestones to view it.")[:180],
         entity_type="milestone", entity_id=milestone.id)
     return {"id": str(milestone.id), "title": milestone.title}
+
+
+class MilestoneUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    milestone_type: Optional[str] = None
+    due_date: Optional[str] = None
+    status: Optional[str] = None            # upcoming | achieved
+    achieved_at: Optional[str] = None       # YYYY-MM-DD
+
+
+@router.patch("/milestones/{milestone_id}")
+async def update_milestone(
+    milestone_id: UUID,
+    body: MilestoneUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Faculty edit a milestone or mark it achieved — assigned students only."""
+    await _require_staff(db, current_user)
+    result = await db.execute(select(Milestone).where(Milestone.id == milestone_id))
+    milestone = result.scalar_one_or_none()
+    if not milestone:
+        raise HTTPException(status_code=404, detail="Milestone not found")
+    await require_student_access(db, current_user, milestone.student_id)
+
+    data = body.model_dump(exclude_unset=True)
+    if data.get("due_date"):
+        data["due_date"] = dt.date.fromisoformat(data["due_date"])
+    if data.get("achieved_at"):
+        data["achieved_at"] = dt.datetime.fromisoformat(data["achieved_at"])
+
+    previous_status = milestone.status
+    for field, value in data.items():
+        setattr(milestone, field, value)
+
+    if milestone.status == "achieved" and previous_status != "achieved":
+        milestone.achieved_at = milestone.achieved_at or dt.datetime.utcnow()
+        await _notify_student(
+            db, milestone.student_id, type="milestone.achieved",
+            title=f"Milestone achieved: {milestone.title}",
+            body=(milestone.description or "Open Exams & Milestones to see it.")[:180],
+            entity_type="milestone", entity_id=milestone.id)
+    elif milestone.status != "achieved":
+        milestone.achieved_at = None
+
+    await db.flush()
+    return {"id": str(milestone.id), "title": milestone.title, "status": milestone.status}
 
 
 # ==================================================================

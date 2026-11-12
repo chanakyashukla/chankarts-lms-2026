@@ -107,9 +107,25 @@
     function enrollmentsFor(studentId) {
         return DB.enrollments.filter(function (e) { return e.student_id === studentId; }).map(function (e) {
             var inst = DB.instructors.filter(function (i) { return i.id === e.instructor_id; })[0];
+            var profile = null;
+            if (inst) {
+                profile = {
+                    name: inst.first_name + ' ' + inst.last_name,
+                    specializations: inst.specializations || null,
+                    qualifications: inst.qualifications || null,
+                    experience_years: inst.experience_years || null,
+                    bio: inst.bio || null,
+                    is_active: inst.is_active !== false
+                };
+            }
             return Object.assign({}, e, {
                 instructor: inst ? inst.first_name + ' ' + inst.last_name : null,
-                student_name: (studentById(e.student_id) || {}).full_name || ''
+                instructor_profile: profile,
+                student_name: (function (s) {
+                    if (!s) return '';
+                    return s.full_name || ((s.first_name || '') + ' ' + (s.last_name || '')).trim();
+                })(studentById(e.student_id)),
+                cma_registration_id: (studentById(e.student_id) || {}).cma_registration_id || null
             });
         });
     }
@@ -208,11 +224,228 @@
     }
 };
 
+    // ---------- real Trinity / RSL certificates (verified academy results) ----------
+    // Certificates ship with the site (assets/certificates/) so the demo can
+    // show and download them without a server; verify_url is the awarding
+    // body's own copy-check page for each certificate.
+    function seedCertificates() {
+        if ((DB.seed_version || 0) >= 3) return;
+        var CERT_DIR = 'assets/certificates/';
+        var records = [
+            {
+                student: 'Siri Hosangadi',
+                title: 'Trinity Grade 1 Electronic Keyboard — Distinction',
+                category: 'exam', awarding_body: 'Trinity College London',
+                programme_id: 'electronic_keyboard', grade_level: 'Grade 1', result: 'Distinction',
+                achieved_on: '2026-11-01',
+                description: 'Level 1 Award in Graded Examination in Music Performance — Electronic Keyboard. Exam held 1 November 2026 at Bangalore-Music (Centre no. 287); performance uploaded 2 November 2026 (12:28 IST); results published 5 November 2026 (19:21 IST); certificate issued 7 November 2026 and delivered 8 November 2026 at 01:31 IST.',
+                verify_url: 'https://certificates.trinitycollege.com/6d9bc910-a6c1-4159-a67d-37bff94e1de3?key=4bc7a2078c10966ace91e8f8b155b7ec5aa48b0ed34103e85a7aefcaff5bd308#acc.hy29aDEr',
+                file: 'trinity-keyboard-grade1-siri-hosangadi.png',
+                filename: 'Trinity Grade 1 Electronic Keyboard - Siri Hosangadi.png'
+            },
+            {
+                student: 'Siri Hosangadi',
+                title: 'Trinity Initial Electronic Keyboard — Distinction',
+                category: 'exam', awarding_body: 'Trinity College London',
+                programme_id: 'electronic_keyboard', grade_level: 'Initial', result: 'Distinction',
+                achieved_on: '2026-01-16',
+                description: 'Entry Level Award in Graded Examination in Music Performance (Entry 3) — Electronic Keyboard. Exam held 16 January 2026 with the performance uploaded the same day (11:06 GMT); results published 5 February 2026 (14:27 GMT); certificate issued 7 February 2026 at 20:00 GMT.',
+                verify_url: 'https://certificates.trinitycollege.com/1ea95d81-e3ec-4b94-9d0d-7bc9e5a51df2?key=c2670931e0d25af6bcdcb6841859ec3d398549857c91316783db74917fffbdf7#acc.TLBrXDhb',
+                file: 'trinity-keyboard-initial-siri-hosangadi.png',
+                filename: 'Trinity Initial Electronic Keyboard - Siri Hosangadi.png'
+            },
+            {
+                student: 'Raina Singh',
+                title: 'Trinity Initial Electronic Keyboard — Distinction',
+                category: 'exam', awarding_body: 'Trinity College London',
+                programme_id: 'electronic_keyboard', grade_level: 'Initial', result: 'Distinction',
+                achieved_on: '2026-11-01',
+                description: 'Entry Level Award in Graded Examination in Music Performance (Entry 3) — Electronic Keyboard. Exam held 1 November 2026 at Bangalore-Music (Centre no. 287) with the performance uploaded 2 November 2026 (12:28 IST); results published 5 November 2026 (19:21 IST); certificate issued 7 November 2026 and delivered 8 November 2026 at 01:31 IST.',
+                verify_url: 'https://certificates.trinitycollege.com/94290130-59f5-4809-beca-5f4ec50edb32?key=b7b8978d78191135504ef9e6fab91321a657d43fbe12d33864302000972a9b30#acc.BHO9dorb',
+                file: 'trinity-keyboard-initial-raina-singh.png',
+                filename: 'Trinity Initial Electronic Keyboard - Raina Singh.png'
+            },
+            {
+                student: 'Sana Muttalli',
+                title: 'Trinity Initial Electronic Keyboard — Distinction',
+                category: 'exam', awarding_body: 'Trinity College London',
+                programme_id: 'electronic_keyboard', grade_level: 'Initial', result: 'Distinction',
+                achieved_on: '2026-02-01',
+                description: 'Entry Level Award in Graded Examination in Music Performance (Entry 3) — Electronic Keyboard. Exam held 1 February 2026 at Bangalore-Music (Centre no. 287) with the performance uploaded 2 February 2026 (06:18 GMT); results published 12 February 2026 (13:17 GMT); certificate issued 14 February 2026 (20:11 GMT).',
+                verify_url: 'https://certificates.trinitycollege.com/f63c3625-88d3-45a5-b6f6-f8ebcc506166?key=f4845474eb44c3871fce3a3e6f30a3c51c7007306c6123cc5082f255fe71b41d#acc.bADeE15X',
+                file: 'trinity-keyboard-initial-sana-muttalli.png',
+                filename: 'Trinity Initial Electronic Keyboard - Sana Muttalli.png'
+            },
+            {
+                student: 'Prakhyaat Verma',
+                title: 'Rockschool Ukulele Entry Level — Distinction',
+                category: 'exam', awarding_body: 'Rockschool (RSL Awards)',
+                programme_id: 'ukulele', grade_level: 'Entry Level', result: 'Distinction',
+                achieved_on: '2026-08-20',
+                description: 'RSL Entry Level Award in Performance (Entry 3) — Ukulele, presented by Chanakya Shukla / ChankArts Music Academy on 20 August 2026. Total credits: 4.',
+                verify_url: null,
+                file: 'rsl-ukulele-distinction-prakhyaat-verma.png',
+                filename: 'Rockschool Ukulele Entry Level - Prakhyaat Verma.png'
+            },
+            {
+                student: 'Rhyah Kansara',
+                title: 'Trinity Grade 1 Piano — Level 1 Award',
+                category: 'exam', awarding_body: 'Trinity College London',
+                programme_id: 'piano', grade_level: 'Grade 1', result: 'Grade 1 Awarded',
+                achieved_on: '2026-11-01',
+                description: 'Awarded Grade 1 in Piano at just seven years old — Level 1 Award in Graded Examination in Music Performance. Exam held 1 November 2026 at Bangalore-Music (Centre no. 287); results published 9 November 2026 at 19:36 IST; certificate issued 11 November 2026 and delivered 12 November 2026 at 01:34 IST. An extraordinary first grade, and only the beginning of her music journey.',
+                verify_url: 'https://certificates.trinitycollege.com/e948931d-0545-4367-b464-b8a212a42010?key=a968468faac4f1d281f3e51c608f46dbc014447b2f17617055ba590ad50a9642#acc.nk2JchDV',
+                file: 'trinity-piano-grade1-rhyah-kansara.jpg',
+                filename: 'Trinity Grade 1 Piano - Rhyah Kansara.jpg'
+            }
+        ];
+        var added = 0;
+        records.forEach(function (rec) {
+            var st = DB.students.filter(function (s) {
+                return (s.first_name + ' ' + s.last_name) === rec.student;
+            })[0];
+            if (!st) return;
+            var already = DB.achievements.some(function (a) {
+                return a.student_id === st.id && a.title === rec.title;
+            });
+            if (already) return;
+            var entry = {
+                id: uid('ac'), student_id: st.id, title: rec.title, category: rec.category,
+                awarding_body: rec.awarding_body, programme_id: rec.programme_id,
+                grade_level: rec.grade_level, result: rec.result, achieved_on: rec.achieved_on,
+                description: rec.description, verify_url: rec.verify_url,
+                certificate: {
+                    stored_name: rec.file, filename: rec.filename,
+                    content_type: /\.jpe?g$/i.test(rec.file) ? 'image/jpeg' : 'image/png',
+                    static: CERT_DIR + rec.file
+                },
+                is_verified: true, is_archived: false,
+                created_at: new Date().toISOString()
+            };
+            DB.achievements.push(entry);
+            added++;
+        });
+        if (added) {
+            DB.audit.push({
+                id: uid('a'), action: 'demo.seeded', entity: 'certificates',
+                at: new Date().toISOString(), note: added + ' verified certificate(s) added to the Hall of Fame'
+            });
+        }
+        DB.seed_version = 3;
+        save(DB);
+    }
+
+    // ---------- exams + milestones: a realistic pathway for every student ----------
+    // Forward-looking records only — target grade, submission window and goals.
+    // A result is never written here: results arrive from the board.
+    var PATHWAY_BOARDS = {
+        piano: 'Trinity College London',
+        electronic_keyboard: 'Trinity College London',
+        western_vocals: 'Trinity College London',
+        music_theory: 'Trinity College London',
+        acoustic_guitar: 'Rockschool (RSL Awards)',
+        electric_guitar: 'Rockschool (RSL Awards)',
+        bass_guitar: 'Rockschool (RSL Awards)',
+        ukulele: 'Rockschool (RSL Awards)',
+        indian_bansuri: 'ChankArts Music Academy'
+    };
+    var PATHWAY_GRADE = { beginner: 'Initial', intermediate: 'Grade 1', advanced: 'Grade 2' };
+    var PATHWAY_PERFORMANCE_GOALS = [
+        'First studio performance',
+        'Recital piece performed from memory',
+        'Full piece played at performance tempo',
+        'Perform for the family at the studio'
+    ];
+    var PATHWAY_SEASONS = ['Winter', 'Winter', 'Spring', 'Spring', 'Spring', 'Summer',
+        'Summer', 'Summer', 'Autumn', 'Autumn', 'Autumn', 'Winter'];
+
+    // Target grade = the next one up from whatever the student already holds
+    // (a certificate at Initial/Entry Level/Debut leads to Grade 1, Grade 1 to
+    // Grade 2, …); otherwise fall back to the skill level.
+    function pathwayGrade(st) {
+        var held = DB.achievements
+            .filter(function (a) { return a.student_id === st.id && a.grade_level; })
+            .map(function (a) { return String(a.grade_level); });
+        var top = 0;
+        held.forEach(function (g) {
+            var m = /^grade\s+(\d+)$/i.exec(g);
+            if (m) top = Math.max(top, parseInt(m[1], 10));
+        });
+        if (top) return 'Grade ' + Math.min(top + 1, 8);
+        if (held.some(function (g) { return /initial|entry level|debut/i.test(g); })) return 'Grade 1';
+        return PATHWAY_GRADE[st.skill_level] || 'Initial';
+    }
+
+    function seedPathways() {
+        if ((DB.seed_version || 0) >= 4) return;
+        var exams = 0, milestones = 0;
+        DB.students.forEach(function (st) {
+            var enr = DB.enrollments.filter(function (e) { return e.student_id === st.id; })[0];
+            if (!enr || enr.status !== 'active') return;
+            var pid = enr.programme_id || '';
+            var board = PATHWAY_BOARDS[pid] || 'ChankArts Music Academy';
+            var grade = pathwayGrade(st);
+
+            if (!DB.exams.some(function (x) { return x.student_id === st.id; })) {
+                var windowStart = new Date(Date.now() + 49 * 86400000);
+                var stance = ['preparing', 'applied', 'confirmed'][DB.students.indexOf(st) % 3];
+                DB.exams.push({
+                    id: uid('ex'), student_id: st.id, enrollment_id: enr.id,
+                    board: board, instrument: enr.programme_name, grade: grade,
+                    application_status: stance,
+                    payment_status: stance === 'preparing' ? 'not_applicable' : 'pending',
+                    exam_window_start: day(49), exam_window_end: day(63),
+                    submission_deadline: day(35),
+                    submission_status: stance === 'confirmed' ? 'submitted' : 'not_submitted',
+                    readiness: st.skill_level === 'advanced' ? 'ready'
+                        : (stance === 'confirmed' ? 'exam_ready' : 'developing'),
+                    result: null,                       // results come from the board, never invented
+                    notes: 'Target session: ' + PATHWAY_SEASONS[windowStart.getMonth()] + ' ' + windowStart.getFullYear(),
+                    created_at: new Date().toISOString()
+                });
+                exams++;
+            }
+
+            var perfTitle = PATHWAY_PERFORMANCE_GOALS[
+                DB.students.indexOf(st) % PATHWAY_PERFORMANCE_GOALS.length];
+            if (!DB.milestones.some(function (m) { return m.student_id === st.id && m.title === perfTitle; })) {
+                DB.milestones.push({
+                    id: uid('ms'), student_id: st.id, enrollment_id: enr.id,
+                    title: perfTitle,
+                    description: 'A prepared piece played through, start to finish, in the studio.',
+                    milestone_type: 'performance', due_date: day(28),
+                    status: 'upcoming', achieved_at: null, created_at: new Date().toISOString()
+                });
+                milestones++;
+            }
+            var prepTitle = 'Finish ' + grade + ' repertoire';
+            if (!DB.milestones.some(function (m) { return m.student_id === st.id && m.title === prepTitle; })) {
+                DB.milestones.push({
+                    id: uid('ms'), student_id: st.id, enrollment_id: enr.id,
+                    title: prepTitle,
+                    description: 'All ' + grade + ' pieces, scales and supporting tests ready for ' + board + '.',
+                    milestone_type: 'assessment', due_date: day(35),
+                    status: 'upcoming', achieved_at: null, created_at: new Date().toISOString()
+                });
+                milestones++;
+            }
+        });
+        if (exams || milestones) {
+            DB.audit.push({
+                id: uid('a'), action: 'demo.seeded', entity: 'pathways',
+                at: new Date().toISOString(),
+                note: exams + ' exam plan(s) and ' + milestones + ' milestone goal(s) added'
+            });
+        }
+        DB.seed_version = 4;
+        save(DB);
+    }
+
     var seedReady = null;
     async function ensureSeed() {
         if (seedReady) return seedReady;
         seedReady = (async function () {
-            if (DB.users.length) return;
+            if (DB.users.length) { seedCertificates(); seedPathways(); return; }
             var now = new Date();
 
             function addUser(username, role, name) {
@@ -337,10 +570,15 @@
                 });
                 // monthly progress report (published, generated from class records)
                 var lastM = ymOf(now, -1);
+                // honour each student's package — 4-class and 8-class students
+                // are marked against their own monthly class count
+                var classesPerMonth = plan === '8_classes' ? 8 : 4;
+                var classesDone = classesPerMonth - (idx % 2 ? 1 : 2);
                 DB.reports.push({
                     id: uid('rep'), student_id: st.id, enrollment_id: enr.id, report_month: lastM,
                     revision: 1, status: 'published', published_at: new Date().toISOString(),
-                    progress_summary: 'Completed ' + (2 + (idx % 2)) + ' of 4 classes. ' + programme + ' technique consolidating well.',
+                    progress_summary: 'Completed ' + classesDone + ' of ' + classesPerMonth + ' classes. ' +
+                        programme + ' technique consolidating well.',
                     topics_covered: 'Scales & warm-ups, sight reading, repertoire piece',
                     strengths: 'Consistent weekly practice', areas_for_improvement: 'Hand position and posture',
                     practice_recommendations: '15 minutes daily', next_month_focus: 'Repertoire polish + exam preparation',
@@ -378,8 +616,8 @@
             });
 
             // exams (Trinity / Rockschool) incl. exam-fee tracking
-            DB.exams.push({ id: uid('ex'), student_id: DB.students[9].id, board: 'Trinity College London', instrument: 'Piano', grade_level: 'Grade 1', application_status: 'confirmed', payment_status: 'pending', exam_date: day(52), readiness: 'preparing', result: null, notes: 'Entry confirmed with Trinity' });
-            DB.exams.push({ id: uid('ex'), student_id: DB.students[1].id, board: 'Rockschool', instrument: 'Electronic Keyboard', grade_level: 'Debut', application_status: 'planning', payment_status: 'not_applicable', exam_date: day(95), readiness: 'not_started', result: null, notes: 'Target session: summer' });
+            // Exam plans for every student are seeded by seedPathways() below —
+            // one coherent plan per student, target grade = next one up.
             DB.exam_fees = DB.exam_fees || [];
             DB.exam_fees.push({ id: uid('ef'), student_id: DB.students[9].id, board: 'Trinity College London', grade_level: 'Grade 1', fee_charged_paise: 600000, academy_paid_paise: 600000, reimbursed_paise: 300000, reimbursement_balance_paise: 300000, status: 'academy_paid', exam_session: 'Spring 2027' });
 
@@ -409,6 +647,8 @@
 
             DB.audit.push({ id: uid('a'), action: 'demo.seeded', entity: 'roster', at: new Date().toISOString(), note: 'Academy roster demo data (preview)' });
             save(DB);
+            seedCertificates();   // verified certificates for the Hall of Fame
+            seedPathways();       // exam plans + milestone goals for every student
         })();
         return seedReady;
     }
@@ -459,7 +699,9 @@
         var user = userById(me.uid);
         if (!user || !user.is_active) return err(401, 'Not authenticated');
         var isChangePin = (P === '/auth/change-pin');
-        if (user.must_change_pin && !isChangePin) return err(403, 'PIN_CHANGE_REQUIRED');
+        // master access (view-as) may look around but can never set a PIN
+        if (isChangePin && me.imp) return err(403, 'MASTER_ACCESS_NO_PIN_CHANGE');
+        if (user.must_change_pin && !isChangePin && !me.imp) return err(403, 'PIN_CHANGE_REQUIRED');
 
         if (isChangePin && method === 'POST') return changePin(user, body);
         if (P === '/auth/me') return json({ id: user.id, username: user.username, email: user.email, role: user.role, is_active: user.is_active, created_at: user.created_at });
@@ -484,7 +726,19 @@
         if (P === '/portal/dashboard') return portalDashboard(user, q);
         if (P === '/portal/enrollments') {
             var ids = linkedStudentIds(user);
-            if (ids === null) ids = DB.students.map(function (s) { return s.id; });
+            if (ids === null) {
+                // staff: an instructor only ever sees their own teaching load
+                // (mirrors the production API), admin sees everything
+                if (user.role === 'instructor') {
+                    var myId = instructorIdFor(user);
+                    return json(DB.enrollments
+                        .filter(function (e) { return e.instructor_id === myId; })
+                        .map(function (e) { return enrollmentsFor(e.student_id)
+                            .filter(function (x) { return x.id === e.id; })[0]; })
+                        .filter(Boolean));
+                }
+                ids = DB.students.map(function (s) { return s.id; });
+            }
             return json([].concat.apply([], ids.map(enrollmentsFor)));
         }
         if (P === '/portal/notifications') return json(DB.notifications.filter(function (n) { return n.user_id === user.id; }));
@@ -493,7 +747,57 @@
             save(DB); return json({ updated: true });
         }
         if (P.indexOf('/portal/support') === 0) return supportRoutes(method, seg, body, user, q);
-        if (P === '/portal/achievements') return json(DB.achievements.filter(function (a) { return a.is_verified && !a.is_archived && allowedStudent(user, a.student_id); }));
+        if (P === '/portal/achievements' && method === 'GET') {
+            var achRows = DB.achievements.filter(function (a) {
+                return a.is_verified && !a.is_archived && allowedStudent(user, a.student_id);
+            });
+            if (q.student_id) {                       // selected student (faculty switcher / parent)
+                if (!allowedStudent(user, q.student_id)) return err(403, 'Not authorised');
+                achRows = achRows.filter(function (a) { return a.student_id === q.student_id; });
+            }
+            return json(achRows);
+        }
+        if (P === '/portal/achievements' && method === 'POST') {
+            // faculty add an achievement — instructors publish straight away,
+            // exactly like the production portal route
+            var isStaffAch = user.role === 'admin' || user.role === 'instructor';
+            if (!isStaffAch) return err(403, 'Faculty or admin access required');
+            if (!body.student_id || !allowedStudent(user, body.student_id)) return err(403, 'You are not assigned to this student');
+            if (!body.title || String(body.title).trim().length < 2) return err(400, 'Title of at least 2 characters is required');
+            var achNewP = {
+                id: uid('ac'), student_id: body.student_id, title: String(body.title).trim(),
+                category: body.category || 'award', awarding_body: body.awarding_body || null,
+                programme_id: body.programme_id || null, grade_level: body.grade_level || null,
+                result: body.result || null, achieved_on: body.achieved_on || null,
+                description: body.description || null,
+                verify_url: body.verify_url ? String(body.verify_url).trim() : null,
+                certificate: null,
+                is_verified: user.role === 'instructor',
+                is_archived: false, created_at: new Date().toISOString()
+            };
+            DB.achievements.push(achNewP);
+            DB.audit.push({ id: uid('a'), action: 'achievement.created', entity: achNewP.title, at: new Date().toISOString(), by: user.username });
+            save(DB);
+            return json(achNewP, 201);
+        }
+        if (seg[0] === 'portal' && seg[1] === 'achievements' && seg[2] && method === 'PATCH') {
+            var isStaffAch2 = user.role === 'admin' || user.role === 'instructor';
+            if (!isStaffAch2) return err(403, 'Faculty or admin access required');
+            var achUpdP = DB.achievements.filter(function (x) { return x.id === seg[2]; })[0];
+            if (!achUpdP) return err(404, 'Not found');
+            if (!allowedStudent(user, achUpdP.student_id)) return err(403, 'You are not assigned to this student');
+            var patchP = Object.assign({}, body);
+            delete patchP.id; delete patchP.student_id; delete patchP.certificate;
+            if (user.role !== 'admin') { delete patchP.is_verified; delete patchP.is_archived; }
+            if (patchP.verify_url !== undefined) patchP.verify_url = patchP.verify_url ? String(patchP.verify_url).trim() : null;
+            Object.assign(achUpdP, patchP);
+            DB.audit.push({ id: uid('a'), action: 'achievement.updated', entity: achUpdP.title, at: new Date().toISOString(), by: user.username });
+            save(DB);
+            return json(achUpdP);
+        }
+        if (seg[0] === 'portal' && seg[1] === 'achievements' && seg[3] === 'certificate' && method === 'POST') {
+            return err(400, 'Certificate uploads run against the production API — the browser demo stores no files.');
+        }
 
         // ---- sessions ----
         if (P === '/sessions' && method === 'GET') return listSessions(user, q);
@@ -845,11 +1149,16 @@
             save(DB); return json(ex, ex.created_at ? 200 : 201);
         }
         if (p === 'exams' && method === 'GET') {
-            var ids3 = linkedStudentIds(user);
-            return json(DB.exams.filter(function (e) { return ids3 === null ? true : ids3.indexOf(e.student_id) !== -1; }));
+            var rowsEx = DB.exams.filter(function (e) { return allowedStudent(user, e.student_id); });
+            if (q.student_id) {
+                if (!allowedStudent(user, q.student_id)) return err(403, 'Not authorised');
+                rowsEx = rowsEx.filter(function (e) { return e.student_id === q.student_id; });
+            }
+            return json(rowsEx);
         }
         if (p === 'exams' && method === 'POST') {
             if (!staff) return err(403, 'Staff only');
+            if (!body.student_id || !allowedStudent(user, body.student_id)) return err(403, 'You are not assigned to this student');
             var ex2 = Object.assign({ id: uid('ex'), created_at: new Date().toISOString() }, body);
             DB.exams.push(ex2); save(DB); return json(ex2, 201);
         }
@@ -857,16 +1166,36 @@
             if (!staff) return err(403, 'Staff only');
             var ex3 = DB.exams.filter(function (e) { return e.id === seg[2]; })[0];
             if (!ex3) return err(404, 'Not found');
+            if (!allowedStudent(user, ex3.student_id)) return err(403, 'You are not assigned to this student');
             Object.assign(ex3, body); save(DB); return json(ex3);
         }
         if (p === 'milestones' && method === 'GET') {
-            var ids4 = linkedStudentIds(user);
-            return json(DB.milestones.filter(function (m) { return ids4 === null ? true : ids4.indexOf(m.student_id) !== -1; }));
+            var rowsMs = DB.milestones.filter(function (m) { return allowedStudent(user, m.student_id); });
+            if (q.student_id) {
+                if (!allowedStudent(user, q.student_id)) return err(403, 'Not authorised');
+                rowsMs = rowsMs.filter(function (m) { return m.student_id === q.student_id; });
+            }
+            return json(rowsMs);
         }
         if (p === 'milestones' && method === 'POST') {
             if (!staff) return err(403, 'Staff only');
-            var ms = Object.assign({ id: uid('ms'), status: 'planned', created_at: new Date().toISOString() }, body);
+            if (!body.student_id || !allowedStudent(user, body.student_id)) return err(403, 'You are not assigned to this student');
+            var ms = Object.assign({ id: uid('ms'), status: 'upcoming', created_at: new Date().toISOString() }, body);
             DB.milestones.push(ms); save(DB); return json(ms, 201);
+        }
+        if (seg[1] === 'milestones' && seg[2] && method === 'PATCH') {
+            if (!staff) return err(403, 'Staff only');
+            var ms2 = DB.milestones.filter(function (m) { return m.id === seg[2]; })[0];
+            if (!ms2) return err(404, 'Not found');
+            if (!allowedStudent(user, ms2.student_id)) return err(403, 'You are not assigned to this student');
+            var prevStatus = ms2.status;
+            Object.assign(ms2, body);
+            if (ms2.status === 'achieved' && prevStatus !== 'achieved') {
+                ms2.achieved_at = ms2.achieved_at || new Date().toISOString();
+            } else if (ms2.status !== 'achieved') {
+                ms2.achieved_at = null;
+            }
+            save(DB); return json(ms2);
         }
         if (p === 'materials' && method === 'GET') {
             var ids5 = linkedStudentIds(user);
@@ -1134,6 +1463,24 @@
             uu.pin_salt = 'chankarts-preview-salt'; uu.pin_hash = null; uu.__demo_pin = pin; uu.must_change_pin = true;
             save(DB); return json({ new_pin: pin, must_change_pin: true });
         }
+        if (seg[1] === 'students' && seg[2] && seg[3] === 'portal-session' && method === 'POST') {
+            // master access: admin opens a student's portal without touching the PIN
+            var suI = DB.students.filter(function (x) { return x.id === seg[2]; })[0];
+            if (!suI) return err(404, 'Not found');
+            var uI = userById(suI.user_id);
+            if (!uI || uI.is_active === false) return err(400, 'Student account is not active');
+            var tokI = signToken({ uid: uI.id, role: uI.role, imp: user.id, exp: Date.now() + 15 * 60 * 1000 });
+            DB.audit.push({
+                id: uid('a'), action: 'admin.portal_view_as', entity_type: 'student', entity_id: suI.id,
+                at: new Date().toISOString(), by: user.username,
+                note: 'Opened the portal as ' + suI.first_name + ' ' + suI.last_name + ' (15 min master-access session)'
+            });
+            save(DB);
+            return json({
+                access_token: tokI, token_type: 'bearer', expires_in: 900,
+                student_name: suI.first_name + ' ' + suI.last_name, login_id: uI.username
+            }, 201);
+        }
         if (seg[1] === 'students' && seg[2] && method === 'PATCH') {
             var su2 = DB.students.filter(function (x) { return x.id === seg[2]; })[0];
             if (!su2) return err(404, 'Not found');
@@ -1273,6 +1620,59 @@
             var e3 = DB.enrollments.filter(function (x) { return x.id === seg[2]; })[0];
             if (!e3) return err(404, 'Not found');
             Object.assign(e3, body); save(DB); return json(e3);
+        }
+        // ---- achievements (verified showcase; mirrors the production API) ----
+        if (p === 'achievements' && method === 'GET') {
+            var achRows = DB.achievements.map(function (a) {
+                var stx = studentById(a.student_id);
+                return Object.assign({}, a, { student_name: stx ? stx.first_name + ' ' + stx.last_name : null });
+            });
+            if (q.student_id) achRows = achRows.filter(function (a) { return a.student_id === q.student_id; });
+            return json(achRows);
+        }
+        if (p === 'achievements' && method === 'POST') {
+            if (!body.student_id || !body.title || String(body.title).trim().length < 2) return err(400, 'Student and title are required');
+            if (!studentById(body.student_id)) return err(404, 'Student not found');
+            if (body.verify_url && !/^https?:\/\/[^/\s]+/i.test(String(body.verify_url).trim())) return err(400, 'verify_url must be an absolute http(s) URL');
+            var achNew = {
+                id: uid('ac'), student_id: body.student_id, title: String(body.title).trim(),
+                category: body.category || 'award', awarding_body: body.awarding_body || null,
+                programme_id: body.programme_id || null, grade_level: body.grade_level || null,
+                result: body.result || null, achieved_on: body.achieved_on || null,
+                description: body.description || null,
+                verify_url: body.verify_url ? String(body.verify_url).trim() : null,
+                certificate: null, is_verified: false, is_archived: false,
+                created_at: new Date().toISOString()
+            };
+            DB.achievements.push(achNew);
+            DB.audit.push({ id: uid('a'), action: 'achievement.created', entity: achNew.title, at: new Date().toISOString(), by: user.username });
+            save(DB); return json(achNew, 201);
+        }
+        if (seg[1] === 'achievements' && seg[2] && seg[3] === 'certificate' && method === 'POST') {
+            return err(400, 'Certificate uploads run against the production API — the browser demo stores no files.');
+        }
+        if (seg[1] === 'achievements' && seg[2] && method === 'PATCH') {
+            var achUpd = DB.achievements.filter(function (x) { return x.id === seg[2]; })[0];
+            if (!achUpd) return err(404, 'Not found');
+            var wasVerified = !!achUpd.is_verified;
+            var patch = Object.assign({}, body);
+            delete patch.id; delete patch.student_id; delete patch.certificate;
+            if (patch.verify_url !== undefined) patch.verify_url = patch.verify_url ? String(patch.verify_url).trim() : null;
+            if (patch.achieved_on === '') patch.achieved_on = null;
+            Object.assign(achUpd, patch);
+            if (achUpd.is_verified && !wasVerified) {
+                var stv = studentById(achUpd.student_id);
+                if (stv) {
+                    DB.notifications.push({
+                        id: uid('nt'), user_id: stv.user_id, type: 'achievement.published',
+                        title: 'Achievement published: ' + achUpd.title,
+                        body: String(achUpd.description || 'Open your Achievements to view it.').slice(0, 180),
+                        created_at: new Date().toISOString(), read_at: null
+                    });
+                }
+            }
+            DB.audit.push({ id: uid('a'), action: 'achievement.updated', entity: achUpd.title, at: new Date().toISOString(), by: user.username });
+            save(DB); return json(achUpd);
         }
         return err(404, 'Unknown admin route: ' + p);
     }

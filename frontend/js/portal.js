@@ -63,6 +63,59 @@ const Portal = (function () {
         return localStorage.getItem('academy_token');
     }
 
+    // Decode the session token's payload (no dependency on the API) — used to
+    // recognise a master-access session so the portal can label itself.
+    function tokenPayload() {
+        const t = token();
+        if (!t) return null;
+        try {
+            const part = t.split('.')[0].replace(/-/g, '+').replace(/_/g, '/');
+            return JSON.parse(atob(part + '='.repeat((4 - (part.length % 4)) % 4)));
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function isMasterAccess() {
+        const p = tokenPayload();
+        return !!(p && p.imp);
+    }
+
+    // Master access banner — shown only while an admin is viewing a student.
+    function masterAccessBanner() {
+        if (!isMasterAccess()) return '';
+        const p = tokenPayload() || {};
+        // JWT exp is seconds; the browser demo issues milliseconds — accept both
+        const expMs = p.exp > 1e12 ? p.exp : p.exp * 1000;
+        const mins = expMs
+            ? Math.max(1, Math.ceil((expMs - Date.now()) / 60000))
+            : 15;
+        const who = (state.me && state.me.student && state.me.student.full_name)
+            || (storedUser().name) || 'this student';
+        return '<div class="master-bar" role="status">' +
+            '<span class="master-bar__key" aria-hidden="true">🔑</span>' +
+            '<span class="master-bar__text"><strong>Master access</strong> — viewing ' + esc(who) +
+            '’s portal · expires in about ' + mins + ' min · their PIN is untouched</span>' +
+            '<button type="button" class="btn-p btn-p--sm btn-p--ghost" data-action="exit-master">Exit to admin</button>' +
+            '</div>';
+    }
+
+    function exitMasterAccess() {
+        const prevToken = localStorage.getItem('academy_token_prev');
+        const prevUser = localStorage.getItem('academy_user_prev');
+        localStorage.removeItem('academy_token_prev');
+        localStorage.removeItem('academy_user_prev');
+        if (prevToken) {
+            localStorage.setItem('academy_token', prevToken);
+            if (prevUser) localStorage.setItem('academy_user', prevUser);
+            window.location.href = window.AppPath('/academy/admin');
+            return;
+        }
+        localStorage.removeItem('academy_token');
+        localStorage.removeItem('academy_user');
+        window.location.href = window.AppPath('/academy/login');
+    }
+
     function storedUser() {
         try { return JSON.parse(localStorage.getItem('academy_user') || '{}'); } catch (e) { return {}; }
     }
@@ -223,6 +276,7 @@ const Portal = (function () {
         { section: 'reports', label: 'Monthly Reports', icon: '☰' },
         { section: 'syllabus', label: 'Syllabus & Progress', icon: '✓' },
         { section: 'exams', label: 'Exams & Milestones', icon: '♛' },
+        { section: 'achievements', label: 'Achievements', icon: '🏆' },
         { section: 'resources', label: 'Resources', icon: '◈' },
         { divider: true },
         { section: 'profile', label: 'My Profile', icon: '◐' },
@@ -235,6 +289,42 @@ const Portal = (function () {
 
     function isFaculty() {
         return state.role === 'instructor';
+    }
+
+    // Faculty work student-by-student (parents get the same switcher for
+    // their children). Returns '' when there is nothing to switch between.
+    function uniqueStudents() {
+        const seen = {};
+        return (state.enrollments || []).filter(function (e) {
+            if (!e.student_id || seen[e.student_id]) return false;
+            seen[e.student_id] = true;
+            return true;
+        });
+    }
+
+    function studentSwitcher() {
+        if (!isFaculty()) return '';
+        const list = uniqueStudents();
+        if (!list.length) return '';
+        if (!state.activeStudentId || !list.some(function (e) { return e.student_id === state.activeStudentId; })) {
+            state.activeStudentId = list[0].student_id;
+        }
+        if (list.length === 1) {
+            return '<div class="child-switch"><span class="child-switch__static">Working with ' +
+                esc(list[0].student_name || 'your student') + '</span></div>';
+        }
+        return '<div class="child-switch">' + list.map(function (e) {
+            const first = (e.student_name || '').split(' ')[0];
+            return '<button data-student="' + esc(e.student_id) + '"' +
+                (e.student_id === state.activeStudentId ? ' class="active"' : '') + '>' +
+                esc(first) + '</button>';
+        }).join('') + '</div>';
+    }
+
+    function selectedStudentName() {
+        const list = uniqueStudents();
+        const hit = list.filter(function (e) { return e.student_id === state.activeStudentId; })[0];
+        return hit ? hit.student_name : null;
     }
 
     function sectionFromPath() {
@@ -289,8 +379,7 @@ const Portal = (function () {
     }
 
     function renderTopbar() {
-        const me = state.me || {};
-        let name = storedUser().name || '';
+        const me = state.me || {};        let name = storedUser().name || '';
         let sub = '';
         if (state.role === 'student' && me.student) {
             name = me.student.full_name;
@@ -471,18 +560,27 @@ const Portal = (function () {
     }
 
     function achievementsStrip() {
-        const list = (state.achievements || []).slice(0, 3);
-        if (!list.length) return '';
-        return '<div class="card"><div class="card__head"><h3 class="card__title">Achievements</h3>' +
-            '<button class="btn-p btn-p--sm btn-p--ghost" data-action="go-achievements">View all</button></div>' +
-            '<div style="display:flex;gap:12px;flex-wrap:wrap;padding:0 16px 14px">' +
+        const all = state.achievements || [];
+        const list = all.slice(0, 3);
+        if (!all.length) return '';
+        return '<div class="card hall-strip">' +
+            '<div class="card__head"><h3 class="card__title">🏆 Hall of Fame</h3>' +
+            '<button class="btn-p btn-p--sm btn-p--ghost" data-action="go-achievements">View all ' + all.length + '</button></div>' +
+            '<div class="hall-strip__row">' +
             list.map(function (a) {
-                return '<div style="flex:1;min-width:180px;border:1px solid var(--line);border-radius:10px;padding:12px">' +
-                    '<div style="font-size:22px">' + (ACHIEVEMENT_ICONS[a.category] || '🏆') + '</div>' +
-                    '<div style="font-weight:600;font-size:13px;margin-top:4px">' + esc(a.title) + '</div>' +
-                    (a.result ? '<div style="font-size:11px;color:var(--text-2);margin-top:2px">' + esc(a.result) + '</div>' : '') +
-                    '</div>';
-            }).join('') + '</div></div>';
+                const href = certificateHref(a);
+                const thumb = href && isImageCert(a)
+                    ? '<img class="hall-strip__thumb" src="' + esc(href) + '" alt="" loading="lazy">'
+                    : '<span class="hall-strip__thumb hall-strip__thumb--icon" aria-hidden="true">' +
+                        (ACHIEVEMENT_ICONS[a.category] || '🏆') + '</span>';
+                return '<button type="button" class="hall-strip__item" data-action="view-certificate" data-id="' + esc(a.id) + '">' +
+                    thumb +
+                    '<span class="hall-strip__text">' +
+                    '<strong>' + esc(a.title) + '</strong>' +
+                    '<span>' + esc([a.result, fmtAwardDate(a.achieved_on)].filter(Boolean).join(' · ')) + '</span>' +
+                    '</span></button>';
+            }).join('') +
+            '</div></div>';
     }
 
     function renderStudentDashboard() {
@@ -1240,9 +1338,14 @@ const Portal = (function () {
     // Section: Exams
     // ------------------------------------------------------------------
     async function loadExams() {
+        // Scoped to the selected student when one is chosen (faculty switcher,
+        // parent child switch) — everyone else gets their own records only.
+        await ensureTeachingLoad();
+        const sid = activeStudentId();
+        const q = sid ? '?student_id=' + encodeURIComponent(sid) : '';
         const results = await Promise.all([
-            api('/learning/exams'),
-            api('/learning/milestones'),
+            api('/learning/exams' + q),
+            api('/learning/milestones' + q),
         ]);
         state.exams = results[0];
         state.milestones = results[1];
@@ -1272,7 +1375,8 @@ const Portal = (function () {
                 '<div class="list__actions">' + badge(m.achieved_at ? 'completed' : m.status || 'pending') + '</div></div>';
         }).join('') : emptyState('★', 'No milestones yet.');
 
-        return '<div class="grid grid--2">' +
+        return studentSwitcher() +
+            '<div class="grid grid--2">' +
             '<div class="card"><div class="card__head"><h3 class="card__title">Exams</h3>' +
             (isFaculty() ? '<button class="btn-p btn-p--sm" data-action="new-exam">＋ Add</button>' : '') + '</div>' + examRows + '</div>' +
             '<div class="card"><div class="card__head"><h3 class="card__title">Milestones</h3>' +
@@ -1328,6 +1432,64 @@ const Portal = (function () {
             '</div>';
     }
 
+    // Student side — who teaches you, with a way to reach them
+    function yourFacultyHtml(enrollments) {
+        const seen = {};
+        const teachers = (enrollments || []).filter(function (e) {
+            const p = e.instructor_profile;
+            if (!p || !p.name || seen[p.name]) return false;
+            seen[p.name] = true;
+            return true;
+        });
+        if (!teachers.length) return '';
+        return '<div class="card fac-card">' +
+            '<div class="card__head"><h3 class="card__title">Your Faculty</h3></div>' +
+            '<p class="fac-card__lead">The people guiding your music — they see your progress, ' +
+            'exams and achievements too. Need anything? Ask them through Help &amp; Support.</p>' +
+            '<div class="fac-grid">' + teachers.map(function (e) {
+                const p = e.instructor_profile;
+                return '<div class="fac">' +
+                    '<span class="fac__avatar">' + esc(initials(p.name)) + '</span>' +
+                    '<div class="fac__body">' +
+                    '<div class="fac__name">' + esc(p.name) + '</div>' +
+                    '<div class="fac__role">' + esc(e.programme_name || '') + '</div>' +
+                    (p.specializations ? '<div class="fac__meta">Teaches ' + esc(p.specializations) + '</div>' : '') +
+                    (p.qualifications ? '<div class="fac__meta">' + esc(p.qualifications) + '</div>' : '') +
+                    (p.experience_years ? '<div class="fac__meta">' + esc(p.experience_years) + ' years of experience</div>' : '') +
+                    (p.bio ? '<p class="fac__bio">' + esc(p.bio) + '</p>' : '') +
+                    '<div class="fac__actions">' +
+                    '<button class="btn-p btn-p--sm btn-p--ghost" data-portal-nav="help">Ask a question</button>' +
+                    '</div></div></div>';
+            }).join('') + '</div></div>';
+    }
+
+    // Instructor side — every student, one click from their records
+    function myStudentsHtml() {
+        const list = uniqueStudents();
+        if (!list.length) return '';
+        return '<div class="card fac-card">' +
+            '<div class="card__head"><h3 class="card__title">My Students</h3>' +
+            '<span class="card__link">' + list.length + ' active</span></div>' +
+            '<p class="fac-card__lead">Open a student to see their Hall of Fame, exams, milestones ' +
+            'and progress — kept in step with what their own portal shows.</p>' +
+            '<div class="fac-grid">' + list.map(function (e) {
+                return '<div class="fac">' +
+                    '<span class="fac__avatar">' + esc(initials(e.student_name)) + '</span>' +
+                    '<div class="fac__body">' +
+                    '<div class="fac__name">' + esc(e.student_name || 'Student') + '</div>' +
+                    '<div class="fac__role">' + esc(e.programme_name || '') +
+                    (e.cma_registration_id ? ' · ' + esc(e.cma_registration_id) : '') + '</div>' +
+                    '<div class="fac__actions">' +
+                    '<button class="btn-p btn-p--sm" data-action="open-student" data-id="' +
+                    esc(e.student_id) + '" data-target="achievements">Hall of Fame</button>' +
+                    '<button class="btn-p btn-p--sm btn-p--ghost" data-action="open-student" data-id="' +
+                    esc(e.student_id) + '" data-target="exams">Exams</button>' +
+                    '<button class="btn-p btn-p--sm btn-p--ghost" data-action="open-student" data-id="' +
+                    esc(e.student_id) + '" data-target="syllabus">Progress</button>' +
+                    '</div></div></div>';
+            }).join('') + '</div></div>';
+    }
+
     function renderProfile() {
         const me = state.me || {};
         if (state.role === 'student' && me.student) {
@@ -1361,7 +1523,8 @@ const Portal = (function () {
                     : emptyState('🎓', 'No enrolments yet.')) +
                 '<div class="card__head" style="margin-top:18px"><h3 class="card__title">Guardians</h3></div>' +
                 (guardianRows || emptyState('👪', 'No guardians on record.')) +
-                '</div></div>';
+                '</div></div>' +
+                yourFacultyHtml(s.enrollments);
         }
         if (state.role === 'parent') {
             const kids = (state.children || []).map(function (c) {
@@ -1385,47 +1548,264 @@ const Portal = (function () {
             (instructor.phone ? '<tr><td>Phone</td><td>' + esc(instructor.phone) + '</td></tr>' : '') +
             (instructor.bio ? '<tr><td>Bio</td><td>' + esc(instructor.bio) + '</td></tr>' : '') +
             '<tr><td>Students</td><td>' + state.enrollments.length + '</td></tr>' +
-            '</tbody></table></div>';
+            '</tbody></table></div>' +
+            myStudentsHtml();
     }
 
     // ------------------------------------------------------------------
-    // Section: Achievements / Trophies
+    // Section: Achievements — the academy's Hall of Fame
     // ------------------------------------------------------------------
     const ACHIEVEMENT_ICONS = {
         exam: '🎓', recital: '🎹', competition: '🏆', certification: '📜', award: '🥇', milestone: '⭐',
     };
 
+    function fmtAwardDate(value) {
+        const d = parseDate(value);
+        if (!d) return '';
+        return d.getDate() + ' ' + MON[d.getMonth()] + ' ' + d.getFullYear();
+    }
+
+    function activeStudentId() {
+        if (state.activeStudentId) return state.activeStudentId;
+        if (state.role === 'student' && state.me && state.me.student) return state.me.student.id;
+        if (state.role === 'instructor') {
+            // default to the first student on the teaching load so faculty land
+            // on a real student rather than an empty screen
+            const list = uniqueStudents();
+            if (list.length) {
+                state.activeStudentId = list[0].student_id;
+                return state.activeStudentId;
+            }
+        }
+        return null;
+    }
+
+    async function ensureTeachingLoad() {
+        if (isFaculty() && !state.enrollments.length) {
+            state.enrollments = await api('/portal/enrollments');
+        }
+    }
+
     async function loadAchievements() {
-        const sid = state.activeStudentId ||
-            (state.role === 'student' && state.me && state.me.student ? state.me.student.id : null);
+        await ensureTeachingLoad();
+        const sid = activeStudentId();
         if (!sid) { state.achievements = []; return; }
         state.achievements = await api('/portal/achievements?student_id=' + sid);
     }
 
+    function findAchievement(id) {
+        return (state.achievements || []).filter(function (a) { return a.id === id; })[0] || null;
+    }
+
+    // Where the certificate file lives: preview/demo records point at a
+    // static asset shipped with this site, production records are served
+    // through the authorised API (never a bare, unauthenticated link).
+    function certificateHref(a) {
+        const c = a && a.certificate;
+        if (!c) return null;
+        if (c.static) return c.static;
+        return BASE + '/portal/achievements/files/' + encodeURIComponent(c.stored_name) +
+            '?student_id=' + encodeURIComponent(activeStudentId() || '');
+    }
+
+    function certificateName(a) {
+        const c = (a && a.certificate) || {};
+        if (c.filename) return c.filename;
+        const slug = String((a && a.title) || 'certificate').replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '');
+        const ext = String(c.stored_name || '').match(/\.[a-z0-9]{2,5}$/i);
+        return (slug || 'certificate') + (ext ? ext[0] : '');
+    }
+
+    function isImageCert(a) {
+        return !!(a.certificate && /^image\//.test(a.certificate.content_type || ''));
+    }
+
+    async function saveBlobFrom(url, filename) {
+        try {
+            const res = await fetch(url, token() ? { headers: { Authorization: 'Bearer ' + token() } } : {});
+            if (!res.ok) throw new Error('Could not download the certificate');
+            const blob = await res.blob();
+            const href = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = href;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            setTimeout(function () { URL.revokeObjectURL(href); }, 4000);
+        } catch (err) {
+            toast(err.message, 'error');
+        }
+    }
+
+    function downloadCertificate(a) {
+        const href = certificateHref(a);
+        if (!href) { toast('No certificate is attached to this achievement yet.', 'error'); return; }
+        return saveBlobFrom(href, certificateName(a));
+    }
+
+    function viewCertificate(a) {
+        const href = certificateHref(a);
+        if (!href || !a) return;
+        const bits = [a.awarding_body, a.grade_level, fmtAwardDate(a.achieved_on)].filter(Boolean).join(' · ');
+        const body = '' +
+            '<div class="cert-view">' +
+            (isImageCert(a)
+                ? '<img class="cert-view__img" src="' + esc(href) + '" alt="' + esc(a.title) + ' — certificate">'
+                : '<div class="cert-view__file"><span aria-hidden="true">📄</span><p>' +
+                    esc((a.certificate && a.certificate.filename) || 'Certificate file') + '</p></div>') +
+            (a.description ? '<p class="cert-view__desc">' + esc(a.description) + '</p>' : '') +
+            '<div class="btn-row">' +
+            '<button class="btn-p btn-p--auto" type="button" data-cert-download>Download certificate</button>' +
+            (a.verify_url
+                ? '<a class="btn-p btn-p--auto btn-p--ghost" href="' + esc(a.verify_url) +
+                    '" target="_blank" rel="noopener noreferrer">Verify original ↗</a>'
+                : '') +
+            '<button class="btn-p btn-p--auto btn-p--ghost" type="button" data-modal-close>Close</button>' +
+            '</div>' +
+            (a.verify_url
+                ? '<p class="cert-view__note">“Verify original” opens the awarding body’s own certificate check — ' +
+                    'the definitive way to confirm this copy is genuine.</p>'
+                : '') +
+            '</div>';
+        const modal = openModal(modalShell(a.title, bits, body));
+        const panel = modal.querySelector('.modal-p');
+        if (panel) panel.classList.add('modal-p--cert');
+        const dl = modal.querySelector('[data-cert-download]');
+        if (dl) dl.addEventListener('click', function () { downloadCertificate(a); });
+    }
+
+    function hallStats(list) {
+        const dates = list.map(function (a) { return a.achieved_on; }).filter(Boolean).sort();
+        return {
+            total: list.length,
+            certificates: list.filter(function (a) { return !!a.certificate; }).length,
+            distinctions: list.filter(function (a) { return /distinction/i.test(a.result || ''); }).length,
+            latest: dates.length ? dates[dates.length - 1] : null,
+        };
+    }
+
+    // Deterministic confetti so the banner doesn't jump between renders.
+    function hallConfetti() {
+        const bits = [];
+        for (let i = 0; i < 20; i++) {
+            const left = (i * 4.7 + (i % 4) * 11) % 100;
+            bits.push('<i style="left:' + left.toFixed(1) + '%;animation-delay:-' +
+                ((i % 7) * 0.8).toFixed(1) + 's;animation-duration:' + (7 + (i % 5)) + 's"></i>');
+        }
+        return bits.join('');
+    }
+
+    function hallHero(stats) {
+        const cells = [
+            { value: stats.total, label: stats.total === 1 ? 'Achievement' : 'Achievements' },
+            { value: stats.distinctions, label: stats.distinctions === 1 ? 'Distinction' : 'Distinctions' },
+            { value: stats.latest ? fmtAwardDate(stats.latest) : '—', label: 'Most recent' },
+        ];
+        return '' +
+            '<section class="hall__hero">' +
+            '<span class="hall__confetti" aria-hidden="true">' + hallConfetti() + '</span>' +
+            '<div class="hall__hero-main">' +
+            '<span class="hall__emblem" aria-hidden="true">🏆</span>' +
+            '<div class="hall__copy">' +
+            '<p class="hall__eyebrow">ChankArts Music Academy</p>' +
+            '<h2 class="hall__title">Hall of Fame</h2>' +
+            '<p class="hall__lead">Real examinations, real results. Every certificate here was earned in the ' +
+            'studio and published only after the academy verified it — download it, or check the original ' +
+            'with the awarding body.</p>' +
+            '</div></div>' +
+            '<div class="hall__stats">' +
+            cells.map(function (c) {
+                return '<div class="hall__stat"><strong>' + esc(String(c.value)) + '</strong>' +
+                    '<span>' + esc(c.label) + '</span></div>';
+            }).join('') +
+            '</div></section>';
+    }
+
+    function achievementActions(a, href) {
+        const buttons = [];
+        if (href) {
+            buttons.push('<button type="button" class="btn-p btn-p--sm" data-action="view-certificate" data-id="' +
+                esc(a.id) + '">View</button>');
+            buttons.push('<button type="button" class="btn-p btn-p--sm btn-p--ghost" data-action="download-certificate" data-id="' +
+                esc(a.id) + '">Download</button>');
+        }
+        if (isFaculty()) {
+            buttons.push('<button type="button" class="btn-p btn-p--sm btn-p--ink" data-action="edit-achievement" data-id="' +
+                esc(a.id) + '">' + (href ? 'Edit' : 'Edit / attach') + '</button>');
+        }
+        if (!buttons.length) return '<p class="ach__pending">Certificate copy to follow.</p>';
+        return '<div class="ach__actions">' + buttons.join('') + '</div>';
+    }
+
+    function hallCard(a) {
+        const href = certificateHref(a);
+        const icon = ACHIEVEMENT_ICONS[a.category] || '🏆';
+        const meta = [a.awarding_body, a.grade_level].filter(Boolean).join(' · ');
+        const dateTxt = fmtAwardDate(a.achieved_on);
+
+        const frame = href && isImageCert(a)
+            ? '<button type="button" class="ach__thumb" data-action="view-certificate" data-id="' + esc(a.id) +
+                '" aria-label="Open the certificate for ' + esc(a.title) + '">' +
+                '<img src="' + esc(href) + '" alt="' + esc(a.title) + '" loading="lazy">' +
+                '<span class="ach__peek" aria-hidden="true">Open certificate</span></button>'
+            : '<div class="ach__thumb ach__thumb--plain"><span class="ach__plain-icon" aria-hidden="true">' +
+                icon + '</span></div>';
+
+        return '' +
+            '<article class="ach">' +
+            '<div class="ach__frame">' + frame +
+            (a.result ? '<span class="ach__ribbon">' + esc(a.result) + '</span>' : '') +
+            '</div>' +
+            '<div class="ach__body">' +
+            '<div class="ach__head">' +
+            '<span class="ach__icon" aria-hidden="true">' + icon + '</span>' +
+            '<div class="ach__titles"><h4 class="ach__title">' + esc(a.title) + '</h4>' +
+            (meta ? '<p class="ach__meta">' + esc(meta) + '</p>' : '') + '</div>' +
+            '</div>' +
+            (dateTxt ? '<p class="ach__date"><span aria-hidden="true">📅</span> Awarded ' + esc(dateTxt) + '</p>' : '') +
+            (a.description ? '<p class="ach__desc">' + esc(a.description) + '</p>' : '') +
+            achievementActions(a, href) +
+            (a.verify_url
+                ? '<a class="ach__verify" href="' + esc(a.verify_url) + '" target="_blank" rel="noopener noreferrer">' +
+                    '<span class="ach__verify-seal" aria-hidden="true">✓</span>' +
+                    '<span>Verify the original with ' + esc(a.awarding_body || 'the awarding body') + '</span>' +
+                    '<span class="ach__verify-arrow" aria-hidden="true">↗</span></a>'
+                : '') +
+            '</div></article>';
+    }
+
     function renderAchievements() {
         const list = state.achievements || [];
-        const cards = list.map(function (a) {
-            return '<div class="card" style="margin:0">' +
-                '<div style="display:flex;gap:12px;align-items:flex-start">' +
-                '<div style="font-size:30px;line-height:1">' + (ACHIEVEMENT_ICONS[a.category] || '🏆') + '</div>' +
-                '<div><div style="font-weight:600;font-size:15px">' + esc(a.title) + '</div>' +
-                '<div style="font-size:12px;color:var(--text-2);margin-top:2px">' +
-                esc([a.awarding_body, a.programme_id, a.grade_level].filter(Boolean).join(' · ')) + '</div>' +
-                (a.result ? '<div style="margin-top:6px"><span class="badge badge--completed">' + esc(a.result) + '</span></div>' : '') +
-                (a.achieved_on ? '<div style="font-size:11px;color:var(--muted);margin-top:6px">Achieved ' + esc(a.achieved_on) + '</div>' : '') +
-                (a.description ? '<div style="font-size:12.5px;color:var(--text-2);margin-top:8px;line-height:1.6">' + esc(a.description) + '</div>' : '') +
-                (a.certificate ? '<div style="margin-top:8px"><a style="font-size:12px" href="' +
-                    BASE + '/portal/achievements/files/' + encodeURIComponent(a.certificate.stored_name) +
-                    '?student_id=' + encodeURIComponent(state.activeStudentId || (state.me && state.me.student ? state.me.student.id : '')) + '" target="_blank">View certificate</a></div>' : '') +
-                '</div></div></div>';
-        }).join('');
+        const who = selectedStudentName();
+        const addBtn = isFaculty()
+            ? '<button type="button" class="btn-p btn-p--sm" data-action="new-achievement">＋ Add achievement</button>'
+            : '';
 
-        return '<div class="card"><div class="card__head"><h3 class="card__title">Achievements &amp; Trophies</h3></div>' +
-            '<p style="font-size:12px;color:var(--muted);margin:0 16px 12px">Verified achievements earned through the academy — ' +
-            'examinations, distinctions, recitals and awards.</p>' +
-            (list.length
-                ? '<div class="grid grid--2" style="padding:0 16px 16px;gap:12px">' + cards + '</div>'
-                : emptyState('🏆', 'No achievements recorded yet — every verified result will appear here.')) +
+        if (!list.length) {
+            return studentSwitcher() + '<div class="hall">' +
+                hallHero({ total: 0, distinctions: 0, latest: null }) +
+                '<div class="card hall__empty">' +
+                (isFaculty()
+                    ? emptyState('🏆', 'No achievements recorded for ' + (who || 'this student') +
+                        ' yet — add the first one and the family sees it straight away.')
+                    : emptyState('🏆', 'The trophy cabinet is waiting. Every distinction, recital and award ' +
+                        'verified by the academy will be celebrated here.')) +
+                (isFaculty() ? '<div style="padding:0 20px 20px">' + addBtn + '</div>' : '') +
+                '</div></div>';
+        }
+
+        return studentSwitcher() + '<div class="hall">' +
+            hallHero(hallStats(list)) +
+            '<div class="hall__bar">' +
+            (isFaculty()
+                ? '<p class="hall__bar-note">Showing ' + esc(who || 'your student') + ' — changes are visible to the family immediately.</p>' +
+                    addBtn
+                : '') +
+            '</div>' +
+            '<div class="hall__grid">' + list.map(hallCard).join('') + '</div>' +
+            '<p class="hall__foot">Verified by ChankArts Music Academy · Results are never published ' +
+            'before the academy has confirmed them with the awarding body.</p>' +
             '</div>';
     }
 
@@ -1525,9 +1905,18 @@ const Portal = (function () {
         state.support = await api('/portal/support');
     }
 
+    async function loadProfile() {
+        // Faculty profiles list their students; make sure the teaching load is
+        // there even when Profile is the first section opened.
+        if (!state.enrollments.length) {
+            state.enrollments = await api('/portal/enrollments');
+        }
+    }
+
     const loaders = {
         achievements: loadAchievements,
         help: loadHelp,
+        profile: loadProfile,
         dashboard: loadDashboard,
         classes: loadClasses,
         billing: loadBilling,
@@ -1561,6 +1950,7 @@ const Portal = (function () {
         if (!root) return;
 
         root.innerHTML =
+            masterAccessBanner() +
             renderTopbar() +
             '<div class="portal-shell">' + renderSidebar() +
             '<main class="portal-main" id="portalMain">' +
@@ -1729,6 +2119,19 @@ const Portal = (function () {
             });
         });
 
+        root.querySelectorAll('[data-student]').forEach(function (btn) {
+            if (btn.dataset.bound) return;
+            btn.dataset.bound = '1';
+            btn.addEventListener('click', async function () {
+                state.activeStudentId = btn.getAttribute('data-student');
+                state.loaded_dashboard = false;
+                state.loaded_syllabus = false;
+                state.loaded_achievements = false;
+                state.loaded_exams = false;
+                await render();
+            });
+        });
+
         root.querySelectorAll('[data-action]').forEach(function (btn) {
             btn.addEventListener('click', handleAction);
         });
@@ -1794,6 +2197,31 @@ const Portal = (function () {
             if (action === 'new-assignment') return newAssignmentModal();
             if (action === 'new-material') return newMaterialModal();
             if (action === 'go-achievements') return go('achievements');
+            if (action === 'open-student') {
+                state.activeStudentId = id;
+                state.loaded_achievements = false;
+                state.loaded_exams = false;
+                state.loaded_syllabus = false;
+                state.loaded_dashboard = false;
+                return go(btn.getAttribute('data-target') || 'achievements');
+            }
+            if (action === 'view-certificate') {
+                const shown = findAchievement(id);
+                if (shown) viewCertificate(shown);
+                return;
+            }
+            if (action === 'download-certificate') {
+                const saved = findAchievement(id);
+                if (saved) downloadCertificate(saved);
+                return;
+            }
+            if (action === 'new-achievement') return newAchievementModal();
+            if (action === 'exit-master') return exitMasterAccess();
+            if (action === 'edit-achievement') {
+                const editable = findAchievement(id);
+                if (editable) editAchievementModal(editable);
+                return;
+            }
             if (action === 'report-payment') return reportPaymentModal();
             if (action === 'view-receipt') return openAuthedBlob('/billing/payments/' + id + '/receipt', 'receipt.html');
             if (action === 'export-statement') {
@@ -2341,6 +2769,113 @@ const Portal = (function () {
         toast('Progress updated');
         state.loaded_syllabus = false;
         await refreshAll();
+    }
+
+    // ---- faculty: add / edit an achievement (published straight away) ----
+    const ACH_FORM_CATEGORIES = ['exam', 'recital', 'competition', 'certification', 'award', 'milestone'];
+
+    function achievementFormHtml(a) {
+        const v = function (key) { return esc((a && a[key]) || ''); };
+        return '<form class="form-p" id="achForm">' +
+            '<div class="field-p"><label>Title</label>' +
+            '<input name="title" required placeholder="Trinity Grade 1 Piano — Distinction" value="' + v('title') + '"></div>' +
+            '<div class="field-row-p">' +
+            '<div class="field-p"><label>Category</label><select name="category">' +
+            ACH_FORM_CATEGORIES.map(function (c) {
+                return '<option value="' + c + '"' + (a && a.category === c ? ' selected' : '') + '>' + c + '</option>';
+            }).join('') + '</select></div>' +
+            '<div class="field-p"><label>Result</label>' +
+            '<input name="result" placeholder="Distinction" value="' + v('result') + '"></div>' +
+            '</div>' +
+            '<div class="field-row-p">' +
+            '<div class="field-p"><label>Awarding body</label>' +
+            '<input name="awarding_body" placeholder="Trinity College London" value="' + v('awarding_body') + '"></div>' +
+            '<div class="field-p"><label>Grade / level</label>' +
+            '<input name="grade_level" placeholder="Grade 1" value="' + v('grade_level') + '"></div>' +
+            '</div>' +
+            '<div class="field-row-p">' +
+            '<div class="field-p"><label>Instrument / course</label>' +
+            '<input name="programme_id" placeholder="piano" value="' + v('programme_id') + '"></div>' +
+            '<div class="field-p"><label>Date achieved</label>' +
+            '<input type="date" name="achieved_on" value="' + v('achieved_on') + '"></div>' +
+            '</div>' +
+            '<div class="field-p"><label>Description (optional)</label>' +
+            '<textarea name="description" rows="3">' + v('description') + '</textarea></div>' +
+            '<div class="field-p"><label>Verify-original link (optional)</label>' +
+            '<input name="verify_url" placeholder="https://certificates.trinitycollege.com/…" value="' + v('verify_url') + '"></div>' +
+            '<div class="field-p"><label>' +
+            (a && a.certificate ? 'Replace certificate (PDF or image)' : 'Certificate (PDF or image, optional)') +
+            '</label><input type="file" name="certificate" accept="application/pdf,image/png,image/jpeg"></div>' +
+            '<p id="achError" class="auth__error" style="display:none"></p>' +
+            '<div class="btn-row"><button type="submit" class="btn-p">Save</button>' +
+            '<button type="button" class="btn-p btn-p--ghost" data-modal-close>Cancel</button></div>' +
+            '</form>';
+    }
+
+    function bindAchievementForm(existing) {
+        document.getElementById('achForm').addEventListener('submit', async function (e) {
+            e.preventDefault();
+            const form = e.target;
+            const el = function (name) { return form.elements[name]; };
+            const err = document.getElementById('achError');
+            const payload = {
+                title: (el('title').value || '').trim(),
+                category: el('category').value,
+                awarding_body: (el('awarding_body').value || '').trim() || null,
+                programme_id: (el('programme_id').value || '').trim() || null,
+                grade_level: (el('grade_level').value || '').trim() || null,
+                result: (el('result').value || '').trim() || null,
+                achieved_on: el('achieved_on').value || null,
+                description: (el('description').value || '').trim() || null,
+                verify_url: (el('verify_url').value || '').trim() || null,
+            };
+            if (payload.title.length < 2) {
+                err.textContent = 'A title of at least 2 characters is required.';
+                err.style.display = 'block';
+                return;
+            }
+            if (!existing && !state.activeStudentId) {
+                err.textContent = 'Select a student first.';
+                err.style.display = 'block';
+                return;
+            }
+            const file = el('certificate').files && el('certificate').files[0];
+            try {
+                let saved = existing;
+                if (existing) {
+                    saved = await api('/portal/achievements/' + existing.id, {
+                        method: 'PATCH', body: JSON.stringify(payload),
+                    });
+                } else {
+                    payload.student_id = state.activeStudentId;
+                    saved = await api('/portal/achievements', {
+                        method: 'POST', body: JSON.stringify(payload),
+                    });
+                }
+                if (file) {
+                    const fd = new FormData();
+                    fd.append('file', file);
+                    await api('/portal/achievements/' + saved.id + '/certificate', { method: 'POST', body: fd });
+                }
+                closeModal();
+                toast(existing ? 'Achievement updated' : 'Published to the family 🎉', 'success');
+                state.loaded_achievements = false;
+                await render();
+            } catch (err2) {
+                err.textContent = err2.message;
+                err.style.display = 'block';
+            }
+        });
+    }
+
+    function newAchievementModal() {
+        openModal(modalShell('Add achievement', 'It appears in the Hall of Fame straight away.', achievementFormHtml(null)));
+        bindAchievementForm(null);
+    }
+
+    function editAchievementModal(a) {
+        openModal(modalShell('Edit achievement', a.title, achievementFormHtml(a)));
+        bindAchievementForm(a);
     }
 
     async function newExamModal() {

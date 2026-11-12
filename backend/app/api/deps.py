@@ -61,9 +61,17 @@ async def get_current_user(
 
     # Forced PIN change on first login: block all data access until the
     # temporary PIN has been replaced (change-pin endpoint itself is exempt).
+    # Master access (an admin's view-as session, `imp` claim) is different: it
+    # must never depend on — or be able to change — the student's own PIN.
     if getattr(user, "must_change_pin", False):
         path = request.url.path if request is not None else ""
-        if not path.endswith("/auth/change-pin"):
+        if payload.get("imp"):
+            if path.endswith("/auth/change-pin"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="MASTER_ACCESS_NO_PIN_CHANGE",
+                )
+        elif not path.endswith("/auth/change-pin"):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="PIN_CHANGE_REQUIRED",

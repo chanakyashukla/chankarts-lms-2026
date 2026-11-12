@@ -87,8 +87,19 @@ async def _enrollments_payload(db: AsyncSession, student_id: UUID) -> List[dict]
     payload = []
     for e in result.scalars().all():
         instructor_name = None
+        instructor_profile = None
         if e.instructor:
             instructor_name = f"{e.instructor.first_name} {e.instructor.last_name}"
+            # Everything a student/parent may see about their teacher — no
+            # contact details (the portal's messaging is the way to reach them).
+            instructor_profile = {
+                "name": instructor_name,
+                "specializations": e.instructor.specializations,
+                "qualifications": e.instructor.qualifications,
+                "experience_years": e.instructor.experience_years,
+                "bio": e.instructor.bio,
+                "is_active": bool(e.instructor.is_active),
+            }
         payload.append(
             {
                 "id": str(e.id),
@@ -100,6 +111,7 @@ async def _enrollments_payload(db: AsyncSession, student_id: UUID) -> List[dict]
                 "start_date": e.start_date.isoformat() if e.start_date else None,
                 "instructor": instructor_name,
                 "instructor_id": str(e.instructor_id) if e.instructor_id else None,
+                "instructor_profile": instructor_profile,
             }
         )
     return payload

@@ -1091,6 +1091,29 @@ const Admin = (function() {
     // ========================================
     // Student PIN reset (administrator)
     // ========================================
+    // ========================================
+    // Master access — open a student's portal as them
+    // ========================================
+    async function viewStudentPortal(studentId) {
+        try {
+            const res = await apiV1Call(`/admin/students/${studentId}/portal-session`, { method: 'POST', body: '{}' });
+            if (!res || !res.access_token) return;
+            try {
+                // keep the admin session so "Exit" can put it straight back
+                localStorage.setItem('academy_token_prev', localStorage.getItem('academy_token') || '');
+                localStorage.setItem('academy_user_prev', localStorage.getItem('academy_user') || '');
+            } catch (e) { /* storage full — exit will fall back to sign-in */ }
+            localStorage.setItem('academy_token', res.access_token);
+            localStorage.setItem('academy_user', JSON.stringify({
+                role: 'student', name: res.student_name, username: res.login_id, master_access: true,
+            }));
+            showToast(`Master access — viewing ${res.student_name} (${Math.round(res.expires_in / 60)} min)`, 'success');
+            window.location.href = window.AppPath('/academy/portal');
+        } catch (e) {
+            showToast(e.message, 'error');
+        }
+    }
+
     async function resetPin(studentId) {
         if (!window.confirm('Generate a new temporary PIN for this student? The current PIN will stop working immediately.')) {
             return;
@@ -1417,6 +1440,7 @@ const Admin = (function() {
                                             <td>${formatDate(s.created_at)}</td>
                                             <td style="white-space:nowrap;">
                                                 <button class="btn btn--secondary btn--sm" onclick="event.stopPropagation();Admin.openStudentWorkspace('${s.id}')">Open →</button>
+                                                <button class="btn btn--secondary btn--sm" onclick="event.stopPropagation();Admin.viewStudentPortal('${s.id}')" title="Master access: open this student's portal without touching their PIN">🔑 View portal</button>
                                                 <button class="btn btn--secondary btn--sm" onclick="event.stopPropagation();Admin.editStudentModal('${s.id}')">Edit</button>
                                                 <button class="btn btn--secondary btn--sm" onclick="event.stopPropagation();Admin.resetPin('${s.id}')">Reset PIN</button>
                                                 ${s.status === 'active'
@@ -3912,6 +3936,7 @@ const Admin = (function() {
                     ${s.must_change_pin ? '<p style="font-size:0.8rem;color:var(--color-warning);margin-top:4px">⚠ Temporary PIN change pending — student must set a new PIN at next sign-in.</p>' : ''}
                 </div>
                 <div class="admin-actions" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;">
+                    <button class="btn btn--secondary btn--sm" onclick="Admin.viewStudentPortal('${s.id}')" title="Master access: open this student's portal without touching their PIN">🔑 View portal</button>
                     <button class="btn btn--secondary btn--sm" onclick="Admin.editStudentModal('${s.id}')">Edit Details</button>
                     <button class="btn btn--secondary btn--sm" onclick="Admin.resetPin('${s.id}')">Reset PIN</button>
                     ${s.status === 'active'
@@ -6817,17 +6842,20 @@ const Admin = (function() {
     // Achievements — verified showcase records
     // ========================================
     const ACH_CATEGORIES = ['exam', 'recital', 'competition', 'certification', 'award', 'milestone'];
+    let achRowsCache = [];
 
     async function renderAchievementsAdmin() {
         const container = document.getElementById('adminContent');
         container.innerHTML = '<div class="admin-loading"><div class="admin-loading__spinner"></div>Loading achievements...</div>';
         try {
             const rows = await apiV1Call('/admin/achievements');
+            achRowsCache = rows || [];
             const trs = (rows || []).map(a => `
                 <tr>
                     <td><strong>${escapeHtml(a.student_name || '—')}</strong></td>
                     <td>${escapeHtml(a.title)}
-                        <div style="font-size:0.75rem;color:var(--color-text-muted)">${escapeHtml([a.awarding_body, a.programme_id, a.grade_level].filter(Boolean).join(' · '))}</div></td>
+                        <div style="font-size:0.75rem;color:var(--color-text-muted)">${escapeHtml([a.awarding_body, a.programme_id, a.grade_level].filter(Boolean).join(' · '))}</div>
+                        ${a.verify_url ? `<div style="margin-top:4px"><a href="${escapeHtml(a.verify_url)}" target="_blank" rel="noopener noreferrer" style="font-size:0.75rem;font-weight:600;color:var(--color-accent, #B58A35)">Verify original ↗</a></div>` : ''}</td>
                     <td>${escapeHtml(a.category)}</td>
                     <td>${escapeHtml(a.result || '—')}</td>
                     <td>${a.achieved_on ? formatDate(a.achieved_on) : '—'}</td>
@@ -6836,6 +6864,10 @@ const Admin = (function() {
                         : '<span class="badge badge--pending">Awaiting verification</span>'}
                         ${a.is_archived ? '<span class="badge badge--cancelled">Archived</span>' : ''}</td>
                     <td>
+                        ${a.certificate
+                            ? `<button class="btn btn--secondary btn--sm" onclick="Admin.openAchievementCert('${a.id}')">Certificate</button>`
+                            : `<button class="btn btn--secondary btn--sm" onclick="Admin.attachCertificate('${a.id}')">Attach cert</button>`}
+                        ${a.certificate ? `<button class="btn btn--secondary btn--sm" onclick="Admin.attachCertificate('${a.id}')">Replace</button>` : ''}
                         ${!a.is_verified ? `<button class="btn btn--primary btn--sm" onclick="Admin.verifyAchievement('${a.id}', true)">Verify</button>` : ''}
                         ${a.is_verified ? `<button class="btn btn--secondary btn--sm" onclick="Admin.verifyAchievement('${a.id}', false)">Unpublish</button>` : ''}
                         <button class="btn btn--secondary btn--sm" onclick="Admin.archiveAchievement('${a.id}', ${a.is_archived ? 'false' : 'true'})">${a.is_archived ? 'Restore' : 'Archive'}</button>
@@ -6882,6 +6914,9 @@ const Admin = (function() {
                 <div class="admin-modal__field"><label class="auth__label">Result / award</label><input class="auth__input" id="acResult" placeholder="Distinction, Merit, Winner…"></div>
                 <div class="admin-modal__field"><label class="auth__label">Date achieved</label><input class="auth__input" type="date" id="acDate"></div>
                 <div class="admin-modal__field"><label class="auth__label">Description (optional)</label><textarea class="auth__input" id="acDescription" rows="2"></textarea></div>
+                <div class="admin-modal__field"><label class="auth__label">Verify-original link (optional)</label>
+                    <input class="auth__input" id="acVerifyUrl" type="url" inputmode="url" placeholder="https://certificates.trinitycollege.com/…">
+                    <small style="display:block;margin-top:4px;font-size:0.72rem;color:var(--color-text-muted)">The awarding body’s own certificate-check page — families see it beside the certificate so they can confirm the original.</small></div>
                 <p id="acError" class="auth__error" style="display:none"></p>
             </div>
             <div class="admin-modal__footer">
@@ -6902,6 +6937,7 @@ const Admin = (function() {
             result: (document.getElementById('acResult').value || '').trim() || null,
             achieved_on: (document.getElementById('acDate').value || '') || null,
             description: (document.getElementById('acDescription').value || '').trim() || null,
+            verify_url: (document.getElementById('acVerifyUrl').value || '').trim() || null,
         };
         if (!payload.student_id || payload.title.length < 2) {
             err.textContent = 'Student and title are required.'; err.style.display = 'block'; return;
@@ -6928,6 +6964,61 @@ const Admin = (function() {
             showToast(is_archived ? 'Achievement archived.' : 'Achievement restored.', 'success');
             renderAchievementsAdmin();
         } catch (e) { alert(e.message); }
+    }
+
+    // Certificate files: pick locally, upload to the API, then open the
+    // stored copy straight from the authorised file endpoint.
+    function attachCertificate(id) {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'application/pdf,image/png,image/jpeg';
+        input.addEventListener('change', function () {
+            const file = input.files && input.files[0];
+            if (file) uploadCertificate(id, file);
+        });
+        input.click();
+    }
+
+    async function uploadCertificate(id, file) {
+        const token = localStorage.getItem('academy_token');
+        const fd = new FormData();
+        fd.append('file', file);
+        try {
+            const res = await fetch(apiOrigin() + '/api/v1/admin/achievements/' + encodeURIComponent(id) + '/certificate', {
+                method: 'POST',
+                headers: token ? { Authorization: 'Bearer ' + token } : {},
+                body: fd,
+            });
+            if (res.status === 401) {
+                localStorage.removeItem('academy_token');
+                localStorage.removeItem('academy_user');
+                window.location.href = window.AppPath('/academy/login');
+                return;
+            }
+            if (!res.ok) {
+                const error = await res.json().catch(() => ({}));
+                throw new Error(typeof error.detail === 'string' ? error.detail : 'Upload failed');
+            }
+            showToast('Certificate attached to the achievement.', 'success');
+            renderAchievementsAdmin();
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function openAchievementCert(id) {
+        const a = (achRowsCache || []).filter(x => x.id === id)[0];
+        if (!a || !a.certificate) return;
+        const token = localStorage.getItem('academy_token');
+        try {
+            const url = apiOrigin() + '/api/v1/portal/achievements/files/' +
+                encodeURIComponent(a.certificate.stored_name) +
+                '?student_id=' + encodeURIComponent(a.student_id);
+            const res = await fetch(url, { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+            if (!res.ok) throw new Error('Could not open the certificate');
+            const blob = await res.blob();
+            const href = URL.createObjectURL(blob);
+            window.open(href, '_blank', 'noopener');
+            setTimeout(() => URL.revokeObjectURL(href), 60000);
+        } catch (e) { showToast(e.message, 'error'); }
     }
 
     // ========================================
@@ -7083,6 +7174,9 @@ const Admin = (function() {
         openStudentWorkspace(id) {
             openStudentWorkspace(id);
         },
+        viewStudentPortal(studentId) {
+            viewStudentPortal(studentId);
+        },
         resetPin(studentId) {
             resetPin(studentId);
         },
@@ -7189,6 +7283,12 @@ const Admin = (function() {
         },
         archiveAchievement(id, flag) {
             archiveAchievement(id, flag);
+        },
+        attachCertificate(id) {
+            attachCertificate(id);
+        },
+        openAchievementCert(id) {
+            openAchievementCert(id);
         },
         openSupportThread(id) {
             openSupportThread(id);

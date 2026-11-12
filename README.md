@@ -64,6 +64,39 @@ node --check frontend/js/admin.js
 node --check frontend/js/preview-api.js
 ```
 
+## Student certificates (Hall of Fame)
+
+Verified certificates live in `frontend/assets/certificates/` (the portal
+serves them from there in the browser preview) and each achievement carries
+the awarding body's own **verify-original** link in `achievements.verify_url`.
+
+To publish them against the production database:
+
+```bash
+cd backend
+python scripts/seed_trinity_certificates.py --dry-run   # report only
+python scripts/seed_trinity_certificates.py --apply     # create + attach
+python scripts/seed_exam_milestones.py --dry-run        # exam plans + goals
+python scripts/seed_exam_milestones.py --apply
+```
+
+Both scripts are idempotent (reruns never duplicate a record) and need the
+`phase8_001` Alembic migration for the `verify_url` column:
+`alembic upgrade head`.
+
+**Who can edit what**
+
+| | create | edit content | verify / archive |
+|---|---|---|---|
+| Admin | ✓ (unverified until published) | ✓ | ✓ |
+| Assigned instructor | ✓ (published immediately) | ✓ | — |
+| Student / parent | — | — | — |
+
+`seed_exam_milestones.py` only ever writes *forward-looking* records — a
+target grade, a submission window and milestone goals. A result is never
+written: results arrive from the board. The target grade is the next one up
+from whatever the student already holds.
+
 ## Deployment
 
 See `docs/DEPLOYMENT.md`. The API is a standard Docker/uvicorn service with

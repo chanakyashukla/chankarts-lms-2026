@@ -31,6 +31,12 @@ class Achievement(Base):
     achieved_on = Column(Date)
     description = Column(Text)
 
+    # issuing body's own copy of the award — a link families can open to
+    # confirm the certificate is genuine (e.g. Trinity College London's
+    # certificate verification page). External https URL only; shown in the
+    # portal next to the certificate, never used for anything else.
+    verify_url = Column(String(500))
+
     # optional certificate (image/PDF), validated server-side
     cert_stored_name = Column(String(80))
     cert_filename = Column(String(255))

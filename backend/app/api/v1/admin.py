@@ -19,7 +19,7 @@ from app.models.attendance import Attendance
 from app.models.progress import Progress
 from app.models.instructor import Instructor
 from app.core.roles import UserRole
-from app.core.security import get_password_hash
+from app.core.security import get_password_hash, create_access_token
 from app.api.deps import require_role
 from app.services.access import get_instructor_for_user
 from app.models.class_schedule import ClassSchedule
@@ -38,6 +38,9 @@ from app.models.learning import Assignment
 from app.models.user import User as _UserForType
 
 router = APIRouter()
+
+# Master access (admin view-as) sessions are deliberately short-lived.
+PORTAL_SESSION_MINUTES = 15
 settings = get_settings()
 
 
@@ -976,6 +979,52 @@ async def delete_schedule_slot(
 # ========================================
 # Student PIN reset (administrator)
 # ========================================
+@router.post("/students/{student_id}/portal-session", status_code=status.HTTP_201_CREATED)
+async def create_student_portal_session(
+    student_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Master access: sign in to a student's portal as that student.
+
+    The student's own PIN is never read, revealed or changed — this mints a
+    separate, short-lived (15 min) token carrying an `imp` claim so the
+    portal can label itself as master access. Every use is written to the
+    audit trail, and an impersonated session is refused the PIN-change
+    endpoint, so viewing an account can never alter how its owner signs in.
+    """
+    student = (await db.execute(select(Student).where(Student.id == student_id))).scalar_one_or_none()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    user = (await db.execute(select(User).where(User.id == student.user_id))).scalar_one_or_none()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=400, detail="Student account is not active")
+
+    token = create_access_token(
+        data={"sub": str(user.id), "role": user.role.value, "imp": str(current_user.id)},
+        expires_delta=timedelta(minutes=PORTAL_SESSION_MINUTES),
+    )
+
+    await record_audit(
+        db,
+        action="admin.portal_view_as",
+        entity_type="student",
+        entity_id=student.id,
+        actor_user_id=current_user.id,
+        actor_role=current_user.role.value,
+        summary=f"Opened the portal as {student.full_name} ({user.username}) — {PORTAL_SESSION_MINUTES} min master-access session",
+    )
+
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_in": PORTAL_SESSION_MINUTES * 60,
+        "student_name": student.full_name,
+        "login_id": user.username,
+    }
+
+
 @router.post("/students/{student_id}/reset-pin")
 async def reset_student_pin(
     student_id: UUID,

@@ -247,3 +247,103 @@ async def test_certificate_upload_validated_and_private(client, world):
         f"/api/v1/portal/achievements/files/{stored}?student_id={w['sa_id']}",
         headers=auth(w["student_b"]))
     assert deny.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Verify-original link — the awarding body's own certificate check page
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_verify_url_round_trip_and_validation(client, world):
+    w = world
+    url = ("https://certificates.trinitycollege.com/6d9bc910-a6c1-4159-a67d-37bff94e1de3"
+           "?key=abc#acc.hy29aDEr")
+    a = await _create(client, w, verify_url=url, title="Trinity Grade 1 Keyboard")
+    assert a["verify_url"] == url
+
+    # survives publishing and is what the family sees
+    await client.patch(f"/api/v1/admin/achievements/{a['id']}",
+                       json={"is_verified": True}, headers=auth(w["admin"]))
+    rows = (await client.get(f"/api/v1/portal/achievements?student_id={w['sa_id']}",
+                             headers=auth(w["student_a"]))).json()
+    assert rows[0]["verify_url"] == url
+
+    # only absolute http(s) links are accepted — never a script or relative path
+    bad = await client.post("/api/v1/admin/achievements", json={
+        "student_id": str(w["sa_id"]), "title": "Bad link", "category": "exam",
+        "verify_url": "javascript:alert(1)",
+    }, headers=auth(w["admin"]))
+    assert bad.status_code == 400
+
+    # the link can be cleared later
+    r = await client.patch(f"/api/v1/admin/achievements/{a['id']}",
+                           json={"verify_url": ""}, headers=auth(w["admin"]))
+    assert r.status_code == 200
+    assert r.json()["verify_url"] is None
+
+
+# ---------------------------------------------------------------------------
+# Assigned faculty manage achievements for their own students
+# ---------------------------------------------------------------------------
+async def _portal_create(client, w, headers=None, **over):
+    payload = {
+        "student_id": str(w["sa_id"]),
+        "title": "First recital performance",
+        "category": "recital",
+        "awarding_body": "ChankArts Music Academy",
+        "result": "Performed",
+        "achieved_on": "2026-10-04",
+    }
+    payload.update(over)
+    return await client.post("/api/v1/portal/achievements", json=payload,
+                             headers=headers or auth(w["instructor"]))
+
+
+@pytest.mark.asyncio
+async def test_assigned_instructor_creates_published_achievement(client, world):
+    w = world
+    r = await _portal_create(client, w)
+    assert r.status_code == 201, r.text
+    assert r.json()["is_verified"] is True      # faculty witnessed it → family sees it now
+
+    # the student sees it straight away, no admin step in between
+    rows = (await client.get(f"/api/v1/portal/achievements?student_id={w['sa_id']}",
+                             headers=auth(w["student_a"]))).json()
+    assert any(x["title"] == "First recital performance" for x in rows)
+
+
+@pytest.mark.asyncio
+async def test_instructor_cannot_touch_unassigned_student(client, world):
+    w = world
+    r = await _portal_create(client, w, student_id=str(w["sb_id"]), title="Not my student")
+    assert r.status_code == 403
+
+    # and cannot edit a record belonging to a student they do not teach
+    other = await _create(client, w, student_id=str(w["sb_id"]), title="Other student award")
+    r2 = await client.patch(f"/api/v1/portal/achievements/{other['id']}",
+                            json={"result": "Tampered"}, headers=auth(w["instructor"]))
+    assert r2.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_instructor_edits_content_but_not_visibility(client, world):
+    w = world
+    a = await _create(client, w)
+    await client.patch(f"/api/v1/admin/achievements/{a['id']}",
+                       json={"is_verified": True}, headers=auth(w["admin"]))
+
+    r = await client.patch(f"/api/v1/portal/achievements/{a['id']}",
+                           json={"result": "Distinction (re-checked)",
+                                 "is_verified": False, "is_archived": True},
+                           headers=auth(w["instructor"]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["result"] == "Distinction (re-checked)"   # content updated
+    assert body["is_verified"] is True                    # visibility untouched
+    assert body["is_archived"] is False
+
+
+@pytest.mark.asyncio
+async def test_students_cannot_publish_their_own_achievement(client, world):
+    w = world
+    r = await _portal_create(client, w, headers=auth(w["student_a"]))
+    assert r.status_code == 403
