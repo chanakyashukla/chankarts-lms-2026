@@ -25,7 +25,7 @@ from app.models.student import Student
 from app.models.support import SupportAttachment, SupportReply, SupportRequest
 from app.models.user import User
 from app.services.access import get_linked_student_ids, get_instructor_for_user, require_student_access
-from app.services.files import BASE_HOMEWORK_TYPES, safe_filename, save_upload
+from app.services.files import AUDIO_TYPES, BASE_HOMEWORK_TYPES, safe_filename, save_upload
 from app.services.notifications import notify_user
 
 portal_router = APIRouter()
@@ -221,7 +221,7 @@ async def upload_support_attachment(
         if req.related_student_id not in mine:
             raise HTTPException(status_code=403, detail="Only conversation participants can attach files")
     stored_name, content_type, size, _ = await save_upload(
-        file, subdir="support", allowed_types=BASE_HOMEWORK_TYPES
+        file, subdir="support", allowed_types=BASE_HOMEWORK_TYPES | AUDIO_TYPES
     )
     att = SupportAttachment(
         request_id=req.id,

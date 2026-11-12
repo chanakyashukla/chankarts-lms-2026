@@ -693,6 +693,53 @@ async def test_assignment_lifecycle(client, instructor_user, student_user, enrol
 
 
 @pytest.mark.asyncio
+async def test_homework_accepts_audio_practice_recordings(client, instructor_user, student_user, enrollment):
+    """A music academy's homework is often a recording.
+
+    No UI ever sets allow_audio, so an MP3 used to be rejected with a 400
+    that the portal swallowed silently. Audio must always be accepted;
+    non-media files must still fail magic-byte validation.
+    """
+    created = await client.post(
+        "/api/v1/learning/assignments",
+        json={"title": "Scales at 60 bpm", "instructions": "Record one take",
+              "enrollment_id": str(enrollment.id), "due_date": "2026-11-30"},
+        headers=auth(instructor_user),
+    )
+    assert created.status_code == 201, created.text
+    assignment = created.json()
+    assert assignment.get("allow_audio") is False      # never enabled anywhere
+
+    mp3 = b"ID3\x03\x00" + b"\x00" * 64 + b"\xff\xfb" + b"\x00" * 256
+    submit = await client.post(
+        f"/api/v1/learning/assignments/{assignment['id']}/submit",
+        data={"notes": "Scales at 60 bpm, hands separately"},
+        files=[("files", ("practice-take.mp3", mp3, "audio/mpeg"))],
+        headers=auth(student_user),
+    )
+    assert submit.status_code == 201, submit.text
+    files = submit.json()["files"]
+    assert files and files[0]["content_type"] == "audio/mpeg"
+    assert files[0]["filename"] == "practice-take.mp3"
+
+    # the student is shown exactly what landed on the server
+    listed = await client.get("/api/v1/learning/assignments", headers=auth(student_user))
+    mine = [a for a in listed.json() if a["id"] == assignment["id"]]
+    assert mine and mine[0]["submission"] is not None
+    shown = mine[0]["submission"]["files"]
+    assert shown and shown[0]["filename"] == "practice-take.mp3"
+    assert shown[0]["size_bytes"] == len(mp3)
+
+    # a script is still rejected — validation was never loosened, only audio
+    bad = await client.post(
+        f"/api/v1/learning/assignments/{assignment['id']}/submit",
+        files=[("files", ("evil.sh", b"#!/bin/sh\necho hacked", "application/octet-stream"))],
+        headers=auth(student_user),
+    )
+    assert bad.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_report_publish_hides_staff_notes(client, admin_user, instructor_user, student_user, enrollment):
     async with TestSessionLocal() as db:
         student = (

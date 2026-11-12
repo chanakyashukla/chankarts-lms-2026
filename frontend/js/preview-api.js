@@ -668,7 +668,21 @@
         (m[2] || '').replace(/^\?/, '').split('&').forEach(function (kv) { if (!kv) return; var p = kv.split('='); query[decodeURIComponent(p[0])] = decodeURIComponent(p[1] || ''); });
         var method = ((init && init.method) || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
         var body = {};
-        try { body = init && init.body ? JSON.parse(init.body) : {}; } catch (e) { body = {}; }
+        if (init && typeof FormData !== 'undefined' && init.body instanceof FormData) {
+            // file uploads arrive as FormData: keep the text fields, summarise
+            // any files (the browser demo cannot store file bytes)
+            init.body.forEach(function (value, key) {
+                if (typeof value === 'string') { body[key] = value; return; }
+                if (value && value.name) {
+                    body.__files = (body.__files || []).concat([{
+                        filename: value.name, size_bytes: value.size || 0,
+                        content_type: value.type || null
+                    }]);
+                }
+            });
+        } else {
+            try { body = init && init.body ? JSON.parse(init.body) : {}; } catch (e) { body = {}; }
+        }
         var headers = (init && init.headers) || {};
         var auth = headers.Authorization || (headers.authorization) || '';
         var token = auth.replace(/^Bearer\s+/i, '');
@@ -1037,7 +1051,7 @@
             var asg = DB.assignments.filter(function (x) { return x.id === seg[2]; })[0];
             if (!asg) return err(404, 'Not found');
             if (!allowedStudent(user, asg.student_id)) return err(403, 'Not authorised');
-            var sub = { id: uid('su'), assignment_id: asg.id, student_id: asg.student_id, attempt_number: DB.submissions.filter(function (s) { return s.assignment_id === asg.id; }).length + 1, notes: body.notes || '', status: 'submitted', submitted_at: new Date().toISOString(), feedback: null, score: null };
+            var sub = { id: uid('su'), assignment_id: asg.id, student_id: asg.student_id, attempt_number: DB.submissions.filter(function (s) { return s.assignment_id === asg.id; }).length + 1, notes: body.notes || '', files: body.__files || [], status: 'submitted', submitted_at: new Date().toISOString(), feedback: null, score: null };
             DB.submissions.push(sub); asg.status = 'submitted'; save(DB); return json(sub, 201);
         }
         if (seg[1] === 'submissions' && seg[2] && seg[3] === 'review' && method === 'POST') {
@@ -1220,7 +1234,18 @@
     }
     function assignmentOut(a) {
         var st = studentById(a.student_id) || {};
-        return Object.assign({}, a, { student_name: st.first_name + ' ' + st.last_name, submissions: DB.submissions.filter(function (s) { return s.assignment_id === a.id; }) });
+        var subs = DB.submissions
+            .filter(function (s) { return s.assignment_id === a.id; })
+            .sort(function (x, y) { return (x.attempt_number || 0) - (y.attempt_number || 0); });
+        var latest = subs.length ? subs[subs.length - 1] : null;
+        return Object.assign({}, a, {
+            student_name: st.first_name + ' ' + st.last_name,
+            submissions: subs,
+            // mirror the production payload: the LATEST submission, files included
+            submission: latest
+                ? Object.assign({}, latest, { files: latest.files || [] })
+                : null
+        });
     }
 
     // ---- billing ----

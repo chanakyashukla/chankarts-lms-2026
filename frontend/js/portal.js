@@ -179,6 +179,13 @@ const Portal = (function () {
         return DOW[d.getDay()] + ', ' + d.getDate() + ' ' + MON[d.getMonth()].slice(0, 3);
     }
 
+    function fmtBytes(bytes) {
+        if (bytes == null || isNaN(bytes)) return '';
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
     function fmtLong(value) {
         const d = typeof value === 'string' ? parseDate(value) : value;
         if (!d) return '—';
@@ -1140,12 +1147,18 @@ const Portal = (function () {
             const due = a.due_date
                 ? '<div class="list__sub list__sub--due">Due: ' + esc(fmtDay(a.due_date)) + ' ' + esc(a.due_date.slice(0, 4)) + '</div>'
                 : '';
+            const attached = sub && sub.files && sub.files.length
+                ? '<div class="list__sub list__sub--file">📎 ' + sub.files.map(function (f) {
+                    return esc(f.filename) + (f.size_bytes ? ' · ' + esc(fmtBytes(f.size_bytes)) : '');
+                }).join(' · ') + '</div>'
+                : '';
             return '<div class="list__row" style="align-items:flex-start">' +
                 '<span class="list__icon">♪</span>' +
                 '<div class="list__body">' +
                 '<div class="list__title">' + esc(a.title) + '</div>' +
                 '<div class="list__sub">' + esc(a.instructions || a.practice_notes || 'Practice as assigned.') + '</div>' +
                 due +
+                attached +
                 (sub && sub.feedback ? '<div class="list__sub" style="color:var(--success)">Faculty: ' + esc(sub.feedback) + '</div>' : '') +
                 '</div>' +
                 '<div class="list__actions">' + action + '</div></div>';
@@ -2384,23 +2397,46 @@ const Portal = (function () {
     }
 
     async function submitHomeworkModal(id) {
-        openModal(modalShell('Submit Homework', 'PDF, JPG or PNG' + (isFaculty() ? '' : ' (audio allowed when enabled)'), '' +
+        openModal(modalShell('Submit Homework', 'PDF, JPG, PNG or MP3 — up to 15 MB.', '' +
             '<form class="form-p" id="hwForm">' +
             '<div class="field-p"><label>Notes</label><textarea name="notes" placeholder="What did you practise?"></textarea></div>' +
-            '<div class="field-p"><label>File</label><input type="file" name="file" accept=".pdf,.jpg,.jpeg,.png,.mp3" required></div>' +
+            '<div class="field-p"><label>File</label><input type="file" name="file" accept=".pdf,.jpg,.jpeg,.png,.mp3,audio/mpeg" required></div>' +
+            '<p class="field-p__hint">Recording a take? Export it as MP3 and upload it here.</p>' +
+            '<p id="hwError" class="auth__error" style="display:none"></p>' +
             '<div class="btn-row"><button type="submit" class="btn-p">Upload</button>' +
             '<button type="button" class="btn-p btn-p--ghost" data-modal-close>Cancel</button></div>' +
             '</form>'));
         document.getElementById('hwForm').addEventListener('submit', async function (e) {
             e.preventDefault();
             const form = e.target;
+            const err = document.getElementById('hwError');
+            const fail = function (message) {
+                err.textContent = message;
+                err.style.display = 'block';
+            };
+            err.style.display = 'none';
+
+            const file = form.file.files[0];
+            if (!file) { fail('Choose a file to upload.'); return; }
+            const maxBytes = 15 * 1024 * 1024;
+            if (file.size > maxBytes) {
+                fail('“' + file.name + '” is ' + Math.round(file.size / (1024 * 1024)) +
+                    ' MB — the limit is 15 MB. Try a shorter recording or export at a smaller bitrate.');
+                return;
+            }
+
             const fd = new FormData();
             fd.append('notes', form.notes.value);
-            const file = form.file.files[0];
-            if (file) fd.append('files', file, file.name);
-            await api('/learning/assignments/' + id + '/submit', { method: 'POST', body: fd });
+            fd.append('files', file, file.name);
+            try {
+                await api('/learning/assignments/' + id + '/submit', { method: 'POST', body: fd });
+            } catch (err2) {
+                // never fail silently — show exactly what the API said
+                fail(err2.message || 'Upload failed. Please try again.');
+                return;
+            }
             closeModal();
-            toast('Homework submitted');
+            toast('Homework submitted 🎉', 'success');
             state.loaded_assignments = false;
             await refreshAll();
         });

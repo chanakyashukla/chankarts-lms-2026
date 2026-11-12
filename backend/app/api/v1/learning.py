@@ -153,7 +153,8 @@ class AssignmentReview(BaseModel):
     status: str = Field(..., pattern="^(reviewed|revision_requested)$")
 
 
-def _serialize_assignment(a: Assignment, submission: Optional[Submission] = None) -> dict:
+def _serialize_assignment(a: Assignment, submission: Optional[Submission] = None,
+                          files: Optional[list] = None) -> dict:
     return {
         "id": str(a.id),
         "title": a.title,
@@ -176,6 +177,11 @@ def _serialize_assignment(a: Assignment, submission: Optional[Submission] = None
                 "reviewed_at": submission.reviewed_at.isoformat() if submission.reviewed_at else None,
                 "attempt_number": submission.attempt_number,
                 "notes": submission.notes,
+                # what actually landed on the server — the student's proof of upload
+                "files": [
+                    {"filename": f.filename, "content_type": f.content_type, "size_bytes": f.size_bytes}
+                    for f in (files or [])
+                ],
             }
             if submission
             else None
@@ -218,8 +224,23 @@ async def list_assignments(
             if current is None or submission.attempt_number > current.attempt_number:
                 submissions_by_assignment[submission.assignment_id] = submission
 
+    files_by_submission = {}
+    if submissions_by_assignment:
+        file_result = await db.execute(
+            select(AssignmentFile).where(
+                AssignmentFile.submission_id.in_([s.id for s in submissions_by_assignment.values()])
+            )
+        )
+        for row in file_result.scalars().all():
+            files_by_submission.setdefault(row.submission_id, []).append(row)
+
     return [
-        _serialize_assignment(a, submissions_by_assignment.get(a.id))
+        _serialize_assignment(
+            a,
+            submissions_by_assignment.get(a.id),
+            files_by_submission.get(submissions_by_assignment[a.id].id)
+            if a.id in submissions_by_assignment else None,
+        )
         for a in assignments
     ]
 
@@ -304,7 +325,7 @@ async def attach_assignment_file(
         raise HTTPException(status_code=404, detail="Assignment not found")
 
     stored_name, content_type, size, digest = await save_upload(
-        file, subdir="assignment_briefs", allowed_types=BASE_HOMEWORK_TYPES
+        file, subdir="assignment_briefs", allowed_types=BASE_HOMEWORK_TYPES | AUDIO_TYPES
     )
     row = AssignmentFile(
         assignment_id=assignment.id,
@@ -329,7 +350,7 @@ async def submit_homework(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Student uploads homework (PDF/image, audio when the assignment allows it)."""
+    """Student uploads homework (PDF/image/audio — magic-byte validated)."""
     if current_user.role != UserRole.STUDENT:
         raise HTTPException(status_code=403, detail="Only students can submit homework")
 
@@ -343,9 +364,11 @@ async def submit_homework(
     if not student or student.id != assignment.student_id:
         raise HTTPException(status_code=403, detail="This assignment is not yours")
 
-    allowed_types = set(BASE_HOMEWORK_TYPES)
-    if assignment.allow_audio:
-        allowed_types |= AUDIO_TYPES
+    # Music homework is very often a recording: audio is always accepted here.
+    # `allow_audio` still records the assignment's stated intent (and is what
+    # the portal uses to label the upload) but it never blocks a genuine
+    # practice recording — students were getting a silent 400 for MP3s.
+    allowed_types = set(BASE_HOMEWORK_TYPES) | AUDIO_TYPES
 
     attempt_result = await db.execute(
         select(Submission).where(Submission.assignment_id == assignment.id)

@@ -2188,3 +2188,20 @@ body.body--portal #app > .footer {
 @media (max-width: 720px) {
     .master-bar { padding: 10px 14px; font-size: 12.5px; }
 }
+
+/* Homework upload helper text + inline errors */
+.field-p__hint {
+    margin: -4px 0 4px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-2);
+}
+
+.form-p .auth__error:empty { display: none; }
+
+/* Submitted file confirmation (student sees exactly what landed) */
+.list__sub--file {
+    color: var(--gold);
+    font-weight: 600;
+    word-break: break-word;
+}
